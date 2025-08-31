@@ -45,15 +45,6 @@ class Settings(BaseSettings):
     tts_apikey_c: Optional[str] = Field(default=None, description="TTS apikey")
     tts_apisecret_c: Optional[str] = Field(default=None, description="TTS apisecret")
     
-    # Real-time ASR Configuration
-    rtasr_appid: Optional[str] = Field(default=None, description="Real-time ASR appid")
-    rtasr_api_key: Optional[str] = Field(default=None, description="Real-time ASR API key")
-    
-    # Security
-    secret_key: Optional[str] = Field(default=None, description="Secret key")
-    algorithm: Optional[str] = Field(default="HS256", description="Algorithm")
-    access_token_expire_minutes: int = Field(default=30, description="Access token expire minutes")
-    
     # CORS
     allowed_origins: List[str] = Field(default=["http://localhost:3000"], description="Allowed CORS origins")
     
@@ -64,8 +55,14 @@ class Settings(BaseSettings):
     # Server Configuration
     host: str = Field(default="0.0.0.0", description="Server host")
     port: int = Field(default=8000, description="Server port")
-    
 
+    # Redis Configuration
+    redis_host: str = Field(default="localhost", description="Redis host")
+    redis_port: int = Field(default=6379, description="Redis port")
+    redis_db: int = Field(default=0, description="Redis database")
+    redis_password: Optional[str] = Field(default=None, description="Redis password")
+    redis_ssl: bool = Field(default=False, description="Redis SSL")
+    redis_decode_responses: bool = Field(default=True, description="Redis decode responses")
     
     class Config:
         env_file = ".env"

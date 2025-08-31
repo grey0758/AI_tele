@@ -3,9 +3,10 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
 from websockets import connect
 from websockets.exceptions import ConnectionClosed
+from app.services.celery_service import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -418,3 +419,70 @@ class PhoneService:
                 await self._listener_task
             except asyncio.CancelledError:
                 pass
+
+
+@celery_app.task(bind=True, name="phone_service.process_call")
+def process_call(self, call_data: Dict[str, Any]) -> Dict[str, Any]:
+    """处理电话呼叫任务"""
+    try:
+        logger.info(f"Processing call task {self.request.id} with data: {call_data}")
+        
+        # 模拟处理逻辑
+        result = {
+            "task_id": self.request.id,
+            "status": "completed",
+            "call_id": call_data.get("call_id"),
+            "processed_at": "2024-01-01T00:00:00Z"
+        }
+        
+        logger.info(f"Call task {self.request.id} completed successfully")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error processing call task {self.request.id}: {e}")
+        # 重新抛出异常，让 Celery 处理重试
+        raise
+
+
+@celery_app.task(bind=True, name="phone_service.send_sms")
+def send_sms(self, phone_number: str, message: str) -> Dict[str, Any]:
+    """发送短信任务"""
+    try:
+        logger.info(f"Sending SMS to {phone_number}: {message}")
+        
+        # 模拟发送逻辑
+        result = {
+            "task_id": self.request.id,
+            "phone_number": phone_number,
+            "status": "sent",
+            "message_id": f"msg_{self.request.id}"
+        }
+        
+        logger.info(f"SMS task {self.request.id} completed successfully")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error sending SMS task {self.request.id}: {e}")
+        raise
+
+
+@celery_app.task(bind=True, name="phone_service.record_call")
+def record_call(self, call_id: str, audio_data: bytes) -> Dict[str, Any]:
+    """录制通话任务"""
+    try:
+        logger.info(f"Recording call {call_id}")
+        
+        # 模拟录制逻辑
+        result = {
+            "task_id": self.request.id,
+            "call_id": call_id,
+            "status": "recorded",
+            "file_path": f"/recordings/{call_id}.wav"
+        }
+        
+        logger.info(f"Call recording task {self.request.id} completed successfully")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error recording call task {self.request.id}: {e}")
+        raise
