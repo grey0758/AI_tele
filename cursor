@@ -1,0 +1,89 @@
+请按照以下规范生成代码：
+1. 不生成任何测试文件或文档文件
+2. 使用 logger 记录日志，禁止使用 print
+3. 遵循 FastAPI 最佳实践
+4. 包含适当的异常处理
+5. 使用类型提示
+6. 如果没有必要，不要添加中文注释
+7. 使用 alembic 进行数据库迁移
+8. 使用 pytest 进行测试
+9. 使用 docker 进行部署
+10. 使用 docker-compose 进行部署
+11. 使用 pytest 进行测试
+12. 使用 alembic 进行数据库迁移
+13. 使用 fastapi-pagination 进行分页
+14.使用uv管理项目
+
+目前不启用功能：
+auth.py   # 认证相关
+users.py  # 用户管理
+upload.py # 文件上传
+security.py      # 安全配置
+user.py
+ user_service.py
+
+├── main.py                    # 应用入口
+├── app/
+│   ├── __init__.py
+│   ├── api/                   # API 层
+│   │   ├── __init__.py
+│   │   ├── deps.py           # 依赖注入
+│   │   └── v1/               # API v1 版本
+│   │       ├── __init__.py
+│   │       ├── api.py        # 路由聚合
+│   │       └── endpoints/    # 具体端点
+│   │           ├── __init__.py
+│   │           ├── auth.py   # 认证相关
+│   │           ├── users.py  # 用户管理
+│   │           └── upload.py # 文件上传
+│   ├── core/                 # 核心配置
+│   │   ├── __init__.py
+│   │   ├── config.py        # 配置管理
+│   │   ├── security.py      # 安全配置
+│   │   ├── logger.py        # 日志配置
+│   │   └── exceptions.py    # 自定义异常
+│   ├── db/                  # 数据库
+│   │   ├── __init__.py
+│   │   ├── base.py         # 数据库基类
+│   │   ├── session.py      # 数据库会话
+│   │   └── init_db.py      # 数据库初始化
+│   ├── models/             # SQLAlchemy 模型
+│   │   ├── __init__.py
+│   │   ├── user.py
+│   ├── schemas/            # Pydantic 模型
+│   │   ├── __init__.py
+│   │   ├── user.py
+│   ├── services/           # 业务逻辑层
+│   │   ├── __init__.py
+│   │   ├── user_service.py
+│   ├── utils/              # 工具函数
+│   │   ├── __init__.py
+│   │   ├── security.py     # 安全工具
+│   │   ├── validators.py   # 验证器
+│   │   ├── response.py     # 响应格式
+│   │   └── file_handler.py # 文件处理
+│   └── middleware/         # 中间件
+│       ├── __init__.py
+│       ├── cors.py
+│       ├── auth.py
+│       └── logging.py
+├── alembic/               # 数据库迁移
+│   ├── versions/          # 迁移版本文件
+│   ├── env.py            # 环境配置
+│   └── alembic.ini       # Alembic 配置
+├── uploads/              # 上传文件目录
+├── logs/                 # 日志文件目录
+├── requirements.txt      # 依赖包
+├── .env                  # 环境变量
+├── .env.example         # 环境变量示例
+├── .gitignore
+├── Dockerfile           # Docker 配置
+└── docker-compose.yml   # Docker Compose
+├── pyproject.toml           # 项目配置
+├── uv.lock                # 项目说明
+
+
+
+
+
+

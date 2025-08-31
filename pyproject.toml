@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-tele"
+version = "0.1.0"
+description = "AI Tele FastAPI Project"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.116.1",
+    "uvicorn[standard]>=0.35.0",
+    "sqlalchemy>=2.0.43",
+    "alembic>=1.12.1",
+    "pydantic>=2.11.7,<3.0.0",
+    "pydantic-settings>=2.1.0",
+    "python-multipart>=0.0.6",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "fastapi-pagination>=0.12.8",
+    "mysqlclient>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "paramiko>=3.4.0",
+    "websocket-client>=1.7.0",
+
+    "email-validator>=2.1.0",
+    "numpy>=1.24.0",
+    "requests>=2.31.0",
+    "pyaudio>=0.2.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "httpx>=0.25.2",
+    "black>=23.11.0",
+    "isort>=5.12.0",
+    "flake8>=7.2.0",
+]
+audio = [
+    "pyaudio>=0.2.11",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*", "alembic*", "logs*", "uploads*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
