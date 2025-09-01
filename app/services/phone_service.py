@@ -3,357 +3,100 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Any
 from websockets import connect
 from websockets.exceptions import ConnectionClosed
 from app.services.celery_service import celery_app
+from app.services.redis_service import redis_service, DeviceInfo, Device, CallRecord
 
 logger = logging.getLogger(__name__)
 
-class PhoneDevice:
-    """电话设备信息"""
-    def __init__(self, device_data: Dict):
-        self.id = device_data.get("id", 0)
-        self.instance = device_data.get("instance", 0)
-        self.model = device_data.get("model", 1)
-        self.bt_connect = device_data.get("btConnect", 0)
-        self.bt_device_name = device_data.get("btDeviceName", "")
-        self.phone_name = device_data.get("phoneName", "")
-        self.device_id = device_data.get("deviceId", "")
-        self.user_id = device_data.get("userId", "")
-        self.firmware_ver = device_data.get("firmWareVer", "")
-        self.valid = device_data.get("valid", 0)
-        self.error = device_data.get("error", "")
-    
-    def to_dict(self) -> Dict:
-        """转换为字典"""
-        return {
-            'id': self.id,
-            'instance': self.instance,
-            'model': self.model,
-            'bt_connect': self.bt_connect,
-            'bt_device_name': self.bt_device_name,
-            'phone_name': self.phone_name,
-            'device_id': self.device_id,
-            'user_id': self.user_id,
-            'firmware_ver': self.firmware_ver,
-            'valid': self.valid,
-            'error': self.error
-        }
-
 class PhoneService:
-    """电话控制器 - 使用内存管理状态"""
+    """简化的电话控制器 - 使用 Celery 任务管理"""
     
-    def __init__(self, connection_id: str = None):
-        self.connection_id = connection_id or str(uuid.uuid4())
+    def __init__(self):
         self.ws_url = "ws://127.0.0.1:9898/ws"
         self.websocket = None
-        self.reconnect_interval = 5
-        self.max_reconnect_attempts = 10
-        
-        # 控制状态
         self.should_stop = False
-        self._connection_task = None
-        self._listener_task = None
+        self._service_task = None
         
-        # 内存状态存储
-        self._connection_state = {
-            'is_connected': False,
-            'reconnect_attempts': 0,
-            'started_at': None,
-            'connected_at': None,
-            'last_error': None
-        }
-        self._devices = {}
-        self._call_states = {}
-        
-        # 事件回调
-        self._event_callbacks = []
+        # 实例化时自动启动服务
+        asyncio.create_task(self._start_service())
     
-    def add_event_callback(self, callback: Callable):
-        """添加事件回调函数"""
-        self._event_callbacks.append(callback)
-    
-    async def _publish_event(self, event_type: str, data: Dict):
-        """发布事件到所有回调函数"""
-        for callback in self._event_callbacks:
-            try:
-                await callback(event_type, data)
-            except Exception as e:
-                logger.error(f"Event callback error: {e}")
-    
-    async def update_connection_state(self, updates: Dict):
-        """更新连接状态"""
-        self._connection_state.update(updates)
-    
-    async def get_connection_state(self) -> Dict:
-        """获取连接状态"""
-        return self._connection_state.copy()
-    
-    async def set_device_info(self, device_id: str, device_data: Dict):
-        """设置设备信息"""
-        self._devices[device_id] = device_data
-    
-    async def get_device_info(self, device_id: str) -> Optional[Dict]:
-        """获取设备信息"""
-        return self._devices.get(device_id)
-    
-    async def get_all_devices(self) -> Dict:
-        """获取所有设备信息"""
-        return self._devices.copy()
-    
-    async def set_call_state(self, call_uuid: str, call_data: Dict):
-        """设置通话状态"""
-        self._call_states[call_uuid] = call_data
-    
-    async def get_call_state(self, call_uuid: str) -> Optional[Dict]:
-        """获取通话状态"""
-        return self._call_states.get(call_uuid)
-    
-    async def start_async(self):
-        """异步启动电话控制器"""
-        if self._connection_task and not self._connection_task.done():
-            logger.warning("Phone controller is already starting/running")
-            return
-            
-        logger.info(f"Starting phone controller with connection_id: {self.connection_id}")
-        
-        # 初始化连接状态
-        await self.update_connection_state({
-            'is_connected': False,
-            'reconnect_attempts': 0,
-            'started_at': asyncio.get_event_loop().time()
-        })
-        
-        # 创建后台连接任务
-        self._connection_task = asyncio.create_task(self._connect_with_retry())
-        
-        # 发布启动事件
-        await self._publish_event('controller_started', {
-            'connection_id': self.connection_id
-        })
-        
-        logger.info("Phone controller start task created")
-    
-    async def _connect_with_retry(self):
-        """带重试的连接逻辑"""
-        state = await self.get_connection_state()
-        
-        while not self.should_stop and state['reconnect_attempts'] < self.max_reconnect_attempts:
-            try:
-                await self._connect_once()
-                
-                # 连接成功后启动监听任务
-                if (await self.get_connection_state())['is_connected']:
-                    self._listener_task = asyncio.create_task(self._listen_messages())
-                    await self._listener_task
-                    
-            except Exception as e:
-                logger.error(f"Connection attempt failed: {e}")
-                state = await self.get_connection_state()
-                await self.update_connection_state({
-                    'is_connected': False,
-                    'reconnect_attempts': state['reconnect_attempts'] + 1,
-                    'last_error': str(e)
-                })
-                
-                state = await self.get_connection_state()
-                if state['reconnect_attempts'] < self.max_reconnect_attempts:
-                    logger.info(f"Retrying connection in {self.reconnect_interval}s... "
-                              f"(attempt {state['reconnect_attempts']}/{self.max_reconnect_attempts})")
-                    await asyncio.sleep(self.reconnect_interval)
-                else:
-                    logger.error("Max reconnection attempts reached")
-                    await self._publish_event('max_reconnect_reached', {
-                        'connection_id': self.connection_id
-                    })
-                    break
-    
-    async def _connect_once(self):
-        """单次连接尝试"""
-        logger.info(f"Connecting to WebSocket server: {self.ws_url}")
-        
+    async def _start_service(self):
+        """启动服务：连接 WebSocket 并开始监听消息"""
         try:
+            logger.info(f"PhoneService 正在启动")
+            
+            # 连接 WebSocket
+            if await self.connect():
+                logger.info(f"PhoneService 已连接 WebSocket，开始监听消息")
+                # 开始监听消息
+                await self.listen_messages()
+            else:
+                logger.error(f"PhoneService 连接 WebSocket 失败")
+                
+        except Exception as e:
+            logger.error(f"PhoneService 启动失败: {e}")
+    
+    async def _stop_service(self):
+        """停止服务"""
+        try:
+            self.should_stop = True
+            await self.disconnect()
+            if self._service_task:
+                self._service_task.cancel()
+            logger.info(f"PhoneService 已停止")
+        except Exception as e:
+            logger.error(f"停止 PhoneService 时出错: {e}")
+    
+    def is_service_running(self) -> bool:
+        """检查服务是否正在运行"""
+        return self.websocket is not None and not self.should_stop
+    
+    def get_service_status(self) -> Dict[str, Any]:
+        """获取服务状态信息"""
+        return {
+            "websocket_connected": self.websocket is not None,
+            "service_running": self.is_service_running(),
+            "should_stop": self.should_stop,
+            "ws_url": self.ws_url
+        }
+    
+    async def restart_service(self):
+        """重启服务"""
+        try:
+            logger.info(f"正在重启 PhoneService")
+            await self._stop_service()
+            self.should_stop = False
+            await self._start_service()
+            logger.info(f"PhoneService 重启完成")
+        except Exception as e:
+            logger.error(f"重启 PhoneService 失败: {e}")
+    
+    async def connect(self) -> bool:
+        """连接到 WebSocket 服务器"""
+        try:
+            logger.info(f"Connecting to WebSocket: {self.ws_url}")
             self.websocket = await connect(self.ws_url)
-            await self.update_connection_state({
-                'is_connected': True,
-                'connected_at': asyncio.get_event_loop().time(),
-                'reconnect_attempts': 0
-            })
-            
             logger.info("WebSocket connected successfully")
-            
-            # 发布连接成功事件
-            await self._publish_event('websocket_connected', {
-                'connection_id': self.connection_id
-            })
-                    
+            return True
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
-            await self.update_connection_state({
-                'is_connected': False,
-                'last_error': str(e)
-            })
-            raise
+            return False
     
-    async def _listen_messages(self):
-        """监听WebSocket消息"""
-        logger.info("Starting message listener")
-        
-        try:
-            async for message in self.websocket:
-                if self.should_stop:
-                    break
-                    
-                try:
-                    await self._handle_message(message)
-                except Exception as e:
-                    logger.error(f"Error handling message: {e}")
-                    
-        except ConnectionClosed:
-            logger.info("WebSocket connection closed")
-            await self.update_connection_state({
-                'is_connected': False,
-                'last_error': 'Connection closed'
-            })
-        except Exception as e:
-            logger.error(f"Message listener error: {e}")
-            await self.update_connection_state({
-                'is_connected': False,
-                'last_error': str(e)
-            })
-        finally:
-            # 发布断开连接事件
-            await self._publish_event('websocket_disconnected', {
-                'connection_id': self.connection_id
-            })
+    async def disconnect(self):
+        """断开 WebSocket 连接"""
+        if self.websocket:
+            try:
+                await self.websocket.close()
+                logger.info("WebSocket disconnected")
+            except Exception as e:
+                logger.error(f"Error disconnecting WebSocket: {e}")
     
-    async def _handle_message(self, message):
-        """处理接收到的消息"""
-        try:
-            data = json.loads(message)
-            logger.debug(f"Received message: {data}")
-            
-            # 发布消息接收事件
-            await self._publish_event('message_received', {
-                'connection_id': self.connection_id,
-                'data': data
-            })
-            
-            # 处理不同类型的消息
-            msg_type = data.get('type')
-            
-            if msg_type == 'device_list':
-                await self._handle_device_list(data)
-            elif msg_type == 'call_out':
-                await self._handle_call_out(data)
-            elif msg_type == 'call_in':
-                await self._handle_call_in(data)
-            elif msg_type == 'hang_up':
-                await self._handle_hang_up(data)
-            elif msg_type == 'message':
-                await self._handle_message_data(data)
-            else:
-                logger.debug(f"Unknown message type: {msg_type}")
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse message as JSON: {e}")
-        except Exception as e:
-            logger.error(f"Error handling message: {e}")
-    
-    async def _handle_device_list(self, data):
-        """处理设备列表消息"""
-        devices = data.get('devices', [])
-        
-        for device_data in devices:
-            device = PhoneDevice(device_data)
-            device_id = device.device_id or str(device.id)
-            
-            # 存储设备信息到内存
-            await self.set_device_info(device_id, device.to_dict())
-        
-        # 发布设备更新事件
-        await self._publish_event('devices_updated', {
-            'connection_id': self.connection_id,
-            'device_count': len(devices)
-        })
-    
-    async def _handle_call_out(self, data):
-        """处理呼出消息"""
-        call_uuid = data.get('call_uuid')
-        if not call_uuid:
-            logger.warning("Call out message missing call_uuid")
-            return
-        
-        # 存储通话状态到内存
-        await self.set_call_state(call_uuid, {
-            'type': 'outgoing',
-            'status': 'initiated',
-            'timestamp': asyncio.get_event_loop().time(),
-            'data': data
-        })
-        
-        # 发布呼出事件
-        await self._publish_event('call_out', {
-            'connection_id': self.connection_id,
-            'call_uuid': call_uuid,
-            'data': data
-        })
-    
-    async def _handle_call_in(self, data):
-        """处理呼入消息"""
-        call_uuid = data.get('call_uuid')
-        if not call_uuid:
-            logger.warning("Call in message missing call_uuid")
-            return
-        
-        # 存储通话状态到内存
-        await self.set_call_state(call_uuid, {
-            'type': 'incoming',
-            'status': 'ringing',
-            'timestamp': asyncio.get_event_loop().time(),
-            'data': data
-        })
-        
-        # 发布呼入事件
-        await self._publish_event('call_in', {
-            'connection_id': self.connection_id,
-            'call_uuid': call_uuid,
-            'data': data
-        })
-    
-    async def _handle_hang_up(self, data):
-        """处理挂断消息"""
-        call_uuid = data.get('call_uuid')
-        if not call_uuid:
-            logger.warning("Hang up message missing call_uuid")
-            return
-        
-        # 更新通话状态
-        call_state = await self.get_call_state(call_uuid)
-        if call_state:
-            call_state['status'] = 'ended'
-            call_state['end_timestamp'] = asyncio.get_event_loop().time()
-            await self.set_call_state(call_uuid, call_state)
-        
-        # 发布挂断事件
-        await self._publish_event('hang_up', {
-            'connection_id': self.connection_id,
-            'call_uuid': call_uuid,
-            'data': data
-        })
-    
-    async def _handle_message_data(self, data):
-        """处理消息数据"""
-        # 发布消息发送事件
-        await self._publish_event('message_sent', {
-            'connection_id': self.connection_id,
-            'data': data
-        })
-    
-    async def send_message(self, message_data: Dict):
-        """发送消息到WebSocket服务器"""
-        if not self.websocket or not (await self.get_connection_state())['is_connected']:
+    async def send_message(self, message_data: Dict) -> bool:
+        """发送消息到 WebSocket 服务器"""
+        if not self.websocket:
             logger.error("WebSocket not connected")
             return False
         
@@ -366,123 +109,287 @@ class PhoneService:
             logger.error(f"Failed to send message: {e}")
             return False
     
-    async def get_status(self) -> Dict:
-        """获取控制器状态"""
-        connection_state = await self.get_connection_state()
-        devices = await self.get_all_devices()
+    async def dial_phone(self, phone_number: str, instance: int = 0, custom_id: str = None) -> Dict[str, Any]:
+        """
+        拨打电话
         
-        return {
-            'connection_id': self.connection_id,
-            'connection_state': connection_state,
-            'device_count': len(devices),
-            'call_count': len(self._call_states),
-            'is_running': self._connection_task and not self._connection_task.done()
-        }
+        Args:
+            phone_number: 要拨打的电话号码
+            instance: 设备实例值
+            custom_id: 自定义ID（可选）
+            
+        Returns:
+            Dict: 拨号结果
+        """
+        try:
+            # 构建拨号消息
+            dial_message = {
+                "method": "call",
+                "instance": instance,
+                "phone": phone_number
+            }
+            
+            # 如果提供了自定义ID，添加到消息中
+            if custom_id:
+                dial_message["CustomId"] = custom_id
+            
+            logger.info(f"Dialing {phone_number} with instance {instance}")
+            
+            # 发送拨号消息
+            success = await self.send_message(dial_message)
+            
+            if success:
+                return {
+                    "success": True,
+                    "phone_number": phone_number,
+                    "instance": instance,
+                    "custom_id": custom_id,
+                    "message": f"拨号请求已发送: {phone_number}"
+                }
+            else:
+                return {
+                    "success": False,
+                    "phone_number": phone_number,
+                    "error": "发送拨号消息失败",
+                    "message": "拨号失败，请检查连接状态"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error dialing phone {phone_number}: {e}")
+            return {
+                "success": False,
+                "phone_number": phone_number,
+                "error": str(e),
+                "message": f"拨号异常: {str(e)}"
+            }
     
-    async def stop(self):
-        """停止控制器"""
-        logger.info(f"Stopping phone controller: {self.connection_id}")
+    async def hang_up(self, instance: int = 0) -> Dict[str, Any]:
+        """
+        挂断电话
         
-        self.should_stop = True
-        
-        # 取消任务
-        if self._connection_task and not self._connection_task.done():
-            self._connection_task.cancel()
-        
-        if self._listener_task and not self._listener_task.done():
-            self._listener_task.cancel()
-        
-        # 关闭WebSocket连接
-        if self.websocket:
-            try:
-                await self.websocket.close()
-            except Exception as e:
-                logger.error(f"Error closing WebSocket: {e}")
-        
-        # 发布停止事件
-        await self._publish_event('controller_stopped', {
-            'connection_id': self.connection_id
-        })
-        
-        logger.info(f"Phone controller stopped: {self.connection_id}")
+        Args:
+            instance: 设备实例值
+            
+        Returns:
+            Dict: 挂断结果
+        """
+        try:
+            hang_up_message = {
+                "method": "hangup",
+                "instance": instance
+            }
+            
+            logger.info(f"Hanging up call on instance {instance}")
+            
+            success = await self.send_message(hang_up_message)
+            
+            if success:
+                return {
+                    "success": True,
+                    "instance": instance,
+                    "message": "挂断请求已发送"
+                }
+            else:
+                return {
+                    "success": False,
+                    "instance": instance,
+                    "error": "发送挂断消息失败"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error hanging up call on instance {instance}: {e}")
+            return {
+                "success": False,
+                "instance": instance,
+                "error": str(e)
+            }
     
-    async def wait_for_stop(self):
-        """等待控制器停止"""
-        if self._connection_task:
-            try:
-                await self._connection_task
-            except asyncio.CancelledError:
-                pass
+    def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
+        try:
+            logger.info("Processing OnConnect message")
+
+            device_info = DeviceInfo(
+                notify=message_data.get("notify"),
+                devid=message_data.get("devid"),
+                version=message_data.get("version"),
+                recordmode=message_data.get("recordmode", 0),
+                devices=[Device(**device) for device in message_data.get("devices", [])]
+            )
+
+            redis_service.set_device_info(device_info)
+            
+            return {
+                "success": True,
+                "message": "连接成功，设备信息已保存",
+                "device_info": device_info.to_dict()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error handling OnConnect message: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "处理连接消息失败"
+            }
+    
+    async def listen_messages(self):
+        """监听 WebSocket 消息"""
+        if not self.websocket:
+            logger.error("WebSocket not connected")
+            return
         
-        if self._listener_task:
-            try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
+        try:
+            async for message in self.websocket:
+                if self.should_stop:
+                    break
+                
+                try:
+                    data = json.loads(message)
+                    logger.debug(f"Received message: {data}")
+                    
+                    # 处理不同类型的消息
+                    notify_type = data.get("notify")
+                    
+                    if notify_type == "OnConnect":
+                        # 处理连接成功消息
+                        result = self.handle_on_connect_message(data)
+                        logger.info(f"OnConnect handled: {result}")
+                        
+                    elif notify_type == "OnCallOut":
+                        # 处理呼出事件
+                        handle_call_out.delay(data)
+                        
+                    elif notify_type == "OnCallIn":
+                        # 处理呼入事件
+                        handle_call_in.delay(data)
 
+                    elif notify_type == "OnHangUp":
+                        # 处理挂断事件
+                        handle_hang_up.delay(data)
+                        
+                    else:
+                        logger.debug(f"Unknown notify type: {notify_type}")
+                        
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse message as JSON: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}")
+                    
+        except ConnectionClosed:
+            logger.info("WebSocket connection closed")
+        except Exception as e:
+            logger.error(f"Error in message listener: {e}")
+        finally:
+            logger.info("Message listener stopped")
 
-@celery_app.task(bind=True, name="phone_service.process_call")
-def process_call(self, call_data: Dict[str, Any]) -> Dict[str, Any]:
-    """处理电话呼叫任务"""
+phone_service = PhoneService()
+
+# ==================== Celery 任务 ====================
+
+@celery_app.task(queue='phone_queue')
+def call_phone(phone_number: str, instance: int = 0, custom_id: str = None):
+    """拨打电话"""
     try:
-        logger.info(f"Processing call task {self.request.id} with data: {call_data}")
-        
-        # 模拟处理逻辑
-        result = {
-            "task_id": self.request.id,
-            "status": "completed",
-            "call_id": call_data.get("call_id"),
-            "processed_at": "2024-01-01T00:00:00Z"
-        }
-        
-        logger.info(f"Call task {self.request.id} completed successfully")
-        return result
-        
+        phone_service.dial_phone(phone_number, instance, custom_id)
     except Exception as e:
-        logger.error(f"Error processing call task {self.request.id}: {e}")
-        # 重新抛出异常，让 Celery 处理重试
+        logger.error(f"Error calling phone: {e}")
         raise
 
-
-@celery_app.task(bind=True, name="phone_service.send_sms")
-def send_sms(self, phone_number: str, message: str) -> Dict[str, Any]:
-    """发送短信任务"""
+@celery_app.task(queue='phone_queue')
+def handle_call_out(message_data: Dict):
+    """处理呼出事件"""
     try:
-        logger.info(f"Sending SMS to {phone_number}: {message}")
+        call_uuid = message_data.get('call_uuid')
+        if not call_uuid:
+            logger.warning("Call out message missing call_uuid")
+            return {"status": "error", "message": "Missing call_uuid"}
+
+        call_data = CallRecord(
+            call_id=call_uuid,
+            phone_number=message_data.get('phone_number'),
+            call_type='outgoing',
+            status='initiated',
+            data=message_data
+        )
         
-        # 模拟发送逻辑
-        result = {
-            "task_id": self.request.id,
-            "phone_number": phone_number,
-            "status": "sent",
-            "message_id": f"msg_{self.request.id}"
-        }
+        save_call_state.delay(call_uuid, call_data)
         
-        logger.info(f"SMS task {self.request.id} completed successfully")
-        return result
-        
+        logger.info(f"Call out initiated: {call_uuid}")
+        return {"status": "success", "call_uuid": call_uuid}
     except Exception as e:
-        logger.error(f"Error sending SMS task {self.request.id}: {e}")
+        logger.error(f"Error handling call out: {e}")
         raise
 
-
-@celery_app.task(bind=True, name="phone_service.record_call")
-def record_call(self, call_id: str, audio_data: bytes) -> Dict[str, Any]:
-    """录制通话任务"""
+@celery_app.task(queue='phone_queue')
+def handle_call_in(message_data: Dict):
+    """处理呼入事件"""
     try:
-        logger.info(f"Recording call {call_id}")
+        call_uuid = message_data.get('call_uuid')
+        if not call_uuid:
+            logger.warning("Call in message missing call_uuid")
+            return {"status": "error", "message": "Missing call_uuid"}
         
-        # 模拟录制逻辑
-        result = {
-            "task_id": self.request.id,
-            "call_id": call_id,
-            "status": "recorded",
-            "file_path": f"/recordings/{call_id}.wav"
-        }
+        call_data = CallRecord(
+            call_id=call_uuid,
+            phone_number=message_data.get('phone_number'),
+            call_type='incoming',
+            status='ringing',
+            data=message_data
+        )
+
+        save_call_state.delay(call_uuid, call_data)
         
-        logger.info(f"Call recording task {self.request.id} completed successfully")
-        return result
-        
+        logger.info(f"Call in received: {call_uuid}")
+        return {"status": "success", "call_uuid": call_uuid}
     except Exception as e:
-        logger.error(f"Error recording call task {self.request.id}: {e}")
+        logger.error(f"Error handling call in: {e}")
+        raise
+
+@celery_app.task(queue='phone_queue')
+def handle_hang_up(message_data: Dict):
+    """处理挂断事件"""
+    try:
+        call_uuid = message_data.get('call_uuid')
+        if not call_uuid:
+            logger.warning("Hang up message missing call_uuid")
+            return {"status": "error", "message": "Missing call_uuid"}
+        
+        call_data = CallRecord(
+            call_id=call_uuid,
+            phone_number=message_data.get('phone_number'),
+            call_type='outgoing',
+            status='ended',
+            data=message_data
+        )
+
+        update_call_state.delay(call_uuid, call_data)
+        
+        logger.info(f"Call ended: {call_uuid}")
+        return {"status": "success", "call_uuid": call_uuid}
+    except Exception as e:
+        logger.error(f"Error handling hang up: {e}")
+        raise
+
+# ==================== 数据存储任务 ====================
+
+@celery_app.task(queue='phone_queue')
+def save_call_state(call_uuid: str, call_data: Dict):
+    """保存通话状态"""
+    try:
+        redis_service.create_call_record(call_uuid, call_data)
+        logger.debug(f"Saving call state: {call_uuid}")
+        return {"status": "saved", "call_uuid": call_uuid}
+    except Exception as e:
+        logger.error(f"Error saving call state: {e}")
+        raise
+
+@celery_app.task(queue='phone_queue')
+def update_call_state(call_uuid: str, update_data: Dict):
+    """更新通话状态"""
+    try:
+        redis_service.update_call_state(call_uuid, update_data)
+        logger.debug(f"Updating call state: {call_uuid}")
+        return {"status": "updated", "call_uuid": call_uuid}
+    except Exception as e:
+        logger.error(f"Error updating call state: {e}")
         raise

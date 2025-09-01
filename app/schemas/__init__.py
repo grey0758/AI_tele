@@ -1,6 +1,12 @@
 # Pydantic schemas package
-from app.schemas.user import UserCreate, UserUpdate, User
-
 __all__ = [
+    "TTSRequest", "TTSResponse", "TTSControl",
+    "RTASRRequest", "RTASRResponse", "RTASRControl",
+    "AIRequest", "AIResponse", "AIControl",
+    "PhoneRequest", "PhoneResponse", "PhoneControl",
+    "Token",
     "UserCreate", "UserUpdate", "User",
+    "UserLogin", "UserRegister", "UserLogout",
+    "UserResetPassword", "UserForgotPassword", "UserChangePassword",
+    "UserUpdateProfile", "UserUpdateAvatar", "UserUpdatePassword",
 ]

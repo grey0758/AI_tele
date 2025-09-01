@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     tts_apikey_c: Optional[str] = Field(default=None, description="TTS apikey")
     tts_apisecret_c: Optional[str] = Field(default=None, description="TTS apisecret")
     
+    # RTASR Configuration
+    rtasr_appid: Optional[str] = Field(default=None, description="RTASR appid")
+    rtasr_api_key: Optional[str] = Field(default=None, description="RTASR api key")
+    
     # CORS
     allowed_origins: List[str] = Field(default=["http://localhost:3000"], description="Allowed CORS origins")
     

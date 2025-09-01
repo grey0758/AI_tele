@@ -11,6 +11,11 @@ fastapi-pagination==0.12.8
 psycopg2-binary==2.9.9
 python-dotenv==1.0.0
 paramiko==3.4.0
+dependency-injector>=4.41.0
+
+# Redis
+redis>=5.0.1
+aioredis>=2.0.1
 
 # Development dependencies
 pytest>=7.4.3
