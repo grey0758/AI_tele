@@ -1,40 +1,52 @@
+# app/services/celery_service.py
+from typing import Optional, List, Dict, Any, Protocol
+import redis
+import threading
 from celery import Celery
 from app.core.config import settings
-from typing import Optional, List, Dict, Any
-import logging
+from app.core.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
+class CeleryServiceInterface(Protocol):
+    """Celery 服务接口"""
+    def get_app(self) -> Celery: ...
+    def startup(self) -> bool: ...
+    def shutdown(self) -> None: ...
+    def send_task(self, name: str, args: list = None, kwargs: dict = None, **options) -> Any: ...
 
-class CeleryManager:
-    """Celery 管理器类，统一管理 Celery 应用的创建和配置"""
+class CeleryService:
+    """Celery 服务实现"""
     
-    def __init__(self, app_name: str = "ai_tele_worker"):
-        self.app_name = app_name
-        self._celery_app: Optional[Celery] = None
-        
-    def build_redis_url(
+    def __init__(
         self,
-        host: str = None,
-        port: int = None,
-        db: int = None,
-        password: Optional[str] = None,
-        ssl: bool = None
-    ) -> str:
+        app_name: str = "ai_tele_worker",
+        redis_host: str = None,
+        redis_port: int = None,
+        redis_db: int = None,
+        redis_password: str = None,
+        redis_ssl: bool = None
+    ):
+        self.app_name = app_name
+        self.redis_host = redis_host or settings.redis_host
+        self.redis_port = redis_port or settings.redis_port
+        self.redis_db = redis_db or settings.redis_db
+        self.redis_password = redis_password or settings.redis_password
+        self.redis_ssl = redis_ssl if redis_ssl is not None else settings.redis_ssl
+        
+        self._celery_app: Optional[Celery] = None
+        self._redis_client: Optional[redis.Redis] = None
+        self._initialized = False
+        self._lock = threading.Lock()
+        
+    def build_redis_url(self) -> str:
         """构建 Redis URL"""
-        # 使用传入参数或默认配置
-        host = host or settings.redis_host
-        port = port or settings.redis_port
-        db = db or settings.redis_db
-        password = password or settings.redis_password
-        ssl = ssl if ssl is not None else settings.redis_ssl
-        
-        if password:
-            url = f"redis://:{password}@{host}:{port}/{db}"
+        if self.redis_password:
+            url = f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
         else:
-            url = f"redis://{host}:{port}/{db}"
+            url = f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
         
-        if ssl:
+        if self.redis_ssl:
             url = url.replace("redis://", "rediss://")
         
         return url
@@ -42,55 +54,34 @@ class CeleryManager:
     def get_default_config(self) -> Dict[str, Any]:
         """获取默认的 Celery 配置"""
         return {
-            # 序列化配置
             "task_serializer": "json",
             "accept_content": ["json"],
             "result_serializer": "json",
-            
-            # 时区配置
             "timezone": "UTC",
             "enable_utc": True,
-            
-            # 任务执行配置
             "task_always_eager": False,
             "task_eager_propagates": True,
-            
-            # 结果配置
             "result_expires": 3600,
-            "result_backend_transport_options": {
-                "master_name": "mymaster",
-                "visibility_timeout": 3600,
-            },
-            
-            # 工作进程配置
             "worker_prefetch_multiplier": 1,
             "worker_max_tasks_per_child": 1000,
-            
-            # 任务路由配置
             "task_routes": {
                 "app.services.phone_service.*": {"queue": "phone_queue"},
                 "app.services.tts_service.*": {"queue": "tts_queue"},
                 "app.services.rtasr_service.*": {"queue": "rtasr_queue"},
                 "app.services.aicall_service.*": {"queue": "aicall_queue"},
             },
-            
-            # 队列配置
             "task_default_queue": "default",
             "task_default_exchange": "default",
             "task_default_routing_key": "default",
-            
-            # 日志配置
-            "worker_log_format": "[%(asctime)s: %(levelname)s/%(processName)s] %(message)s",
-            "worker_task_log_format": "[%(asctime)s: %(levelname)s/%(processName)s][%(task_name)s(%(task_id)s)] %(message)s",
         }
     
     def get_default_includes(self) -> List[str]:
         """获取默认的任务模块列表"""
         return [
-            "app.services.phone_service",
-            "app.services.tts_service", 
-            "app.services.rtasr_service",
-            "app.services.aicall_service",
+            "app.tasks.phone_tasks",
+            "app.tasks.tts_tasks", 
+            "app.tasks.rtasr_tasks",
+            "app.tasks.aicall_tasks",
         ]
     
     def create_celery_app(
@@ -103,39 +94,34 @@ class CeleryManager:
     ) -> Celery:
         """创建并配置 Celery 应用"""
         
-        # 构建 Redis URL
-        if not broker_url:
-            broker_url = self.build_redis_url()
-        if not backend_url:
-            backend_url = broker_url
+        with self._lock:
+            if not broker_url:
+                broker_url = self.build_redis_url()
+            if not backend_url:
+                backend_url = broker_url
+                
+            if includes is None:
+                includes = self.get_default_includes()
+                
+            celery_app = Celery(
+                self.app_name,
+                broker=broker_url,
+                backend=backend_url,
+                include=includes
+            )
             
-        # 获取包含的任务模块
-        if includes is None:
-            includes = self.get_default_includes()
+            final_config = self.get_default_config()
+            if config:
+                final_config.update(config)
+                
+            celery_app.conf.update(final_config)
             
-        # 创建 Celery 实例
-        celery_app = Celery(
-            self.app_name,
-            broker=broker_url,
-            backend=backend_url,
-            include=includes
-        )
-        
-        # 合并配置
-        final_config = self.get_default_config()
-        if config:
-            final_config.update(config)
+            if auto_discover:
+                self._auto_discover_tasks(celery_app, includes)
             
-        # 应用配置
-        celery_app.conf.update(final_config)
-        
-        # 自动发现任务
-        if auto_discover:
-            self._auto_discover_tasks(celery_app, includes)
-        
-        self._celery_app = celery_app
-        return celery_app
-    
+            self._celery_app = celery_app
+            return celery_app
+
     def _auto_discover_tasks(self, celery_app: Celery, task_modules: List[str]):
         """自动发现任务"""
         try:
@@ -144,23 +130,57 @@ class CeleryManager:
         except Exception as e:
             logger.warning(f"Failed to auto-discover tasks: {e}")
     
-    def get_celery_app(self) -> Celery:
-        """获取 Celery 应用实例，如果不存在则创建"""
-        if self._celery_app is None:
-            self._celery_app = self.create_celery_app()
+    def startup(self) -> bool:
+        """启动时初始化 Celery"""
+        if self._initialized:
+            logger.info("Celery 已经初始化，跳过重复初始化")
+            return True
+            
+        try:
+            logger.info("=== 开始初始化 Celery 应用 ===")
+            
+            self.create_celery_app()
+            
+            if self._celery_app:
+                broker_url = self._celery_app.conf.broker_url
+                logger.info(f"Celery 应用初始化成功！")
+                logger.info(f"  - Broker URL: {broker_url}")
+                logger.info(f"  - 应用名称: {self._celery_app.main}")
+                
+                self._initialized = True
+                logger.info("=== Celery 初始化完成 ===")
+                return True
+            
+            logger.error("Celery 应用创建失败")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Celery 启动失败: {e}")
+            return False
+    
+    def shutdown(self):
+        """关闭时清理 Celery"""
+        try:
+            with self._lock:
+                if self._celery_app:
+                    try:
+                        if hasattr(self._celery_app, 'close'):
+                            self._celery_app.close()
+                    except Exception as e:
+                        logger.warning(f"关闭 Celery 应用时出错: {e}")
+                    
+                    self._celery_app = None
+                    logger.info("Celery 应用已关闭")
+                self._initialized = False
+        except Exception as e:
+            logger.error(f"关闭 Celery 应用时出错: {e}")
+    
+    def get_app(self) -> Celery:
+        """获取 Celery 应用实例"""
+        if not self._celery_app:
+            raise RuntimeError("Celery 应用未初始化")
         return self._celery_app
     
-    def recreate_celery_app(self, **kwargs) -> Celery:
-        """重新创建 Celery 应用"""
-        self._celery_app = None
-        return self.create_celery_app(**kwargs)
-
-
-# 创建全局管理器实例
-celery_manager = CeleryManager()
-
-# 创建全局 Celery 实例（保持向后兼容）
-celery_app = celery_manager.get_celery_app()
-
-# 导出
-__all__ = ["celery_app"]
+    def send_task(self, name: str, args: list = None, kwargs: dict = None, **options):
+        """发送任务"""
+        return self.get_app().send_task(name, args=args, kwargs=kwargs, **options)

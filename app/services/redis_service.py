@@ -1,12 +1,16 @@
+from contextlib import asynccontextmanager
 import redis
 import json
 import logging
 import uuid
 from typing import Optional, Dict, Any, List
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+# 使用主应用的logger
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 @dataclass
 class Device:
@@ -49,18 +53,27 @@ class DeviceInfo:
         )
 
 @dataclass
+class DialogEntry:
+    """对话记录数据类"""
+    speaker: str
+    content: str
+    timestamp: str
+
+@dataclass
 class CallRecord:
     """电话记录数据类"""
-    call_id: str  # UUID
-    phone_number: str  # 电话号码
-    call_type: str  # 呼叫类型：呼出/呼入
-    status: str  # 当前状态：呼出/接通/已挂断
-    start_time: str  # 开始时间
-    end_time: Optional[str] = None  # 结束时间（挂断时设置）
-    duration: Optional[int] = None  # 通话时长（秒）
-    device_instance: Optional[int] = None  # 设备实例ID
-    notes: Optional[str] = None  # 备注信息
-    
+    call_id: str
+    phone_number: str
+    call_type: str
+    status: str
+    start_time: str
+    end_time: Optional[str] = None
+    duration: Optional[int] = None
+    device_instance: Optional[int] = None
+    dialog_record: List[DialogEntry] = field(default_factory=list)
+    dialog_record_reply_marking: Optional[int] = 0
+    notes: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return asdict(self)
@@ -68,34 +81,86 @@ class CallRecord:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'CallRecord':
         """从字典创建实例"""
-        return cls(**data)
+        dialog_record = [DialogEntry(**entry) for entry in data.get('dialog_record', [])]
+        return cls(
+            call_id=data.get('call_id', ''),
+            phone_number=data.get('phone_number', ''),
+            call_type=data.get('call_type', ''),
+            status=data.get('status', ''),
+            start_time=data.get('start_time', ''),
+            end_time=data.get('end_time'),
+            duration=data.get('duration'),
+            device_instance=data.get('device_instance'),
+            dialog_record=dialog_record,
+            dialog_record_reply_marking=data.get('dialog_record_reply_marking', 0),
+            notes=data.get('notes')
+        )
 
 class RedisService:
     """Redis 服务类 - 统一管理设备信息和电话记录"""
     
     # Redis 键名常量
-    DEVICE_INFO_KEY = "device_info"  # 设备信息的固定键名
-    CALL_RECORD_PREFIX = "call_record:"  # 电话记录键前缀
+    DEVICE_INFO_KEY = "device_info"
+    CALL_RECORD_PREFIX = "call_record:"
     
     def __init__(self):
-        """初始化 Redis 连接"""
+        """初始化 Redis 服务（延迟连接）"""
+        self.redis_client: Optional[redis.Redis] = None
+        self._connection_pool: Optional[redis.ConnectionPool] = None
+        self._initialized = False
+    
+    def startup(self) -> bool:
+        """启动时初始化 Redis 连接"""
+        if self._initialized:
+            return True
+            
         try:
-            self.redis_client = redis.Redis(
-                host=settings.REDIS_HOST,
-                port=settings.REDIS_PORT,
-                password=settings.REDIS_PASSWORD,
-                db=settings.REDIS_DB,
+            # 创建连接池
+            self._connection_pool = redis.ConnectionPool(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                password=settings.redis_password,
+                db=settings.redis_db,
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5,
-                retry_on_timeout=True
+                retry_on_timeout=True,
+                health_check_interval=30,
             )
+            
+            # 创建 Redis 客户端
+            self.redis_client = redis.Redis(connection_pool=self._connection_pool)
+            
             # 测试连接
             self.redis_client.ping()
+            self._initialized = True
             logger.info("Redis 连接成功")
+            return True
         except Exception as e:
             logger.error(f"Redis 连接失败: {e}")
-            raise
+            return False
+    
+    def shutdown(self):
+        """关闭时清理 Redis 连接"""
+        try:
+            if self.redis_client:
+                self.redis_client.close()
+                self.redis_client = None
+                logger.info("Redis 客户端已关闭")
+            
+            if self._connection_pool:
+                self._connection_pool.disconnect()
+                self._connection_pool = None
+                logger.info("Redis 连接池已关闭")
+                
+            self._initialized = False
+        except Exception as e:
+            logger.error(f"关闭 Redis 连接时出错: {e}")
+    
+    def _ensure_connected(self):
+        """确保 Redis 已连接"""
+        if not self._initialized or not self.redis_client:
+            raise RuntimeError("Redis 未初始化，请先调用 startup() 方法")
     
     # ==================== 设备信息管理 ====================
     
@@ -109,6 +174,7 @@ class RedisService:
         Returns:
             bool: 操作是否成功
         """
+        self._ensure_connected()
         try:
             device_data = device_info.to_dict()
             self.redis_client.set(
@@ -128,6 +194,7 @@ class RedisService:
         Returns:
             DeviceInfo: 设备信息对象，不存在时返回 None
         """
+        self._ensure_connected()
         try:
             data = self.redis_client.get(self.DEVICE_INFO_KEY)
             if not data:
@@ -152,6 +219,7 @@ class RedisService:
         Returns:
             int: 设备的 instance 值，不存在时返回 None
         """
+        self._ensure_connected()
         try:
             device_info = self.get_device_info()
             if not device_info or not device_info.devices:
@@ -176,6 +244,7 @@ class RedisService:
         Returns:
             bool: 设备信息是否存在
         """
+        self._ensure_connected()
         try:
             return self.redis_client.exists(self.DEVICE_INFO_KEY) > 0
         except Exception as e:
@@ -189,6 +258,7 @@ class RedisService:
         Returns:
             bool: 操作是否成功
         """
+        self._ensure_connected()
         try:
             result = self.redis_client.delete(self.DEVICE_INFO_KEY)
             if result:
@@ -225,18 +295,21 @@ class RedisService:
 
     # ==================== 电话记录管理 ====================
     
-    def create_call_record(self, call_id: str, phone_number: str, call_type: str = "呼出", device_instance: Optional[int] = None) -> str:
+    def create_call_record(self, call_id: str, phone_number: str, call_type: str = "呼出", device_instance: Optional[int] = None, **kwargs) -> str:
         """
         创建新的电话记录
         
         Args:
+            call_id: 电话记录ID
             phone_number: 电话号码
             call_type: 呼叫类型（呼出/呼入）
             device_instance: 设备实例ID
+            **kwargs: 其他字段（如 dialog_record, notes 等）
             
         Returns:
             str: 生成的UUID
         """
+        self._ensure_connected()
         try:
             call_record = CallRecord(
                 call_id=call_id,
@@ -244,7 +317,8 @@ class RedisService:
                 call_type=call_type,
                 status="呼出",
                 start_time=self._get_current_time(),
-                device_instance=device_instance
+                device_instance=device_instance,
+                **kwargs
             )
             
             key = f"{self.CALL_RECORD_PREFIX}{call_id}"
@@ -259,55 +333,57 @@ class RedisService:
         except Exception as e:
             logger.error(f"创建电话记录失败: {e}")
             raise
-    
-    def update_call_status(self, call_id: str, status: str, **kwargs) -> bool:
+
+    def update_call_record(self, call_record: CallRecord) -> bool:
         """
-        更新电话记录状态
+        更新电话记录（使用 CallRecord 对象）
         
         Args:
-            call_id: 电话记录ID
-            status: 新状态（呼出/接通/已挂断）
-            **kwargs: 其他要更新的字段
+            call_record: 包含更新数据的 CallRecord 对象，call_id 必须存在
             
         Returns:
             bool: 操作是否成功
         """
+        self._ensure_connected()
         try:
-            key = f"{self.CALL_RECORD_PREFIX}{call_id}"
-            call_record = self.get_call_record(call_id)
-            
-            if not call_record:
-                logger.warning(f"电话记录不存在: {call_id}")
+            if not call_record.call_id:
+                logger.error("CallRecord 对象缺少 call_id")
                 return False
             
-            # 更新状态
-            call_record.status = status
+            # 获取现有记录
+            existing_record = self.get_call_record(call_record.call_id)
+            if not existing_record:
+                logger.warning(f"电话记录不存在: {call_record.call_id}")
+                return False
             
-            # 更新其他字段
-            for field, value in kwargs.items():
+            # 更新字段（只更新非 None 的字段）
+            for field in ['status', 'phone_number', 'call_type', 'device_instance', 'dialog_record', 'dialog_record_reply_marking', 'notes']:
                 if hasattr(call_record, field):
-                    setattr(call_record, field, value)
+                    new_value = getattr(call_record, field)
+                    if new_value is not None:  # 只更新非 None 值
+                        setattr(existing_record, field, new_value)
             
             # 如果状态是已挂断，设置结束时间和计算通话时长
-            if status == "已挂断" and not call_record.end_time:
-                call_record.end_time = self._get_current_time()
-                if call_record.start_time:
+            if existing_record.status == "已挂断" and not existing_record.end_time:
+                existing_record.end_time = self._get_current_time()
+                if existing_record.start_time:
                     # 这里可以添加时间计算逻辑
                     pass
             
             # 保存更新后的记录
+            key = f"{self.CALL_RECORD_PREFIX}{existing_record.call_id}"
             self.redis_client.set(
                 key,
-                json.dumps(call_record.to_dict(), ensure_ascii=False),
+                json.dumps(existing_record.to_dict(), ensure_ascii=False),
                 ex=86400  # 24小时过期
             )
             
-            logger.info(f"更新电话记录状态成功: {call_id}, 新状态: {status}")
+            logger.info(f"更新电话记录成功: {existing_record.call_id}")
             return True
         except Exception as e:
-            logger.error(f"更新电话记录状态失败: {e}")
+            logger.error(f"更新电话记录失败: {e}")
             return False
-    
+
     def get_call_record(self, call_id: str) -> Optional[CallRecord]:
         """
         获取电话记录
@@ -318,6 +394,7 @@ class RedisService:
         Returns:
             CallRecord: 电话记录对象，不存在时返回 None
         """
+        self._ensure_connected()
         try:
             key = f"{self.CALL_RECORD_PREFIX}{call_id}"
             data = self.redis_client.get(key)
@@ -335,77 +412,55 @@ class RedisService:
             return None
     
     def get_all_call_records(self) -> List[CallRecord]:
-        """
-        获取所有电话记录
-        
-        Returns:
-            List[CallRecord]: 所有电话记录列表
-        """
+        """获取所有电话记录"""
+        self._ensure_connected()
         try:
             pattern = f"{self.CALL_RECORD_PREFIX}*"
             keys = self.redis_client.keys(pattern)
             
-            call_records = []
+            records = []
             for key in keys:
                 data = self.redis_client.get(key)
                 if data:
                     call_dict = json.loads(data)
-                    call_record = CallRecord.from_dict(call_dict)
-                    call_records.append(call_record)
+                    records.append(CallRecord.from_dict(call_dict))
             
-            logger.info(f"获取所有电话记录成功，共 {len(call_records)} 条")
-            return call_records
+            logger.info(f"获取所有电话记录成功，共 {len(records)} 条")
+            return records
         except Exception as e:
             logger.error(f"获取所有电话记录失败: {e}")
             return []
     
-    def delete_call_record(self, call_id: str) -> bool:
-        """
-        删除电话记录
+    def get_dialog_after_marking(self, call_id: str) -> str:
+        """获取标记后的对话记录并更新标记"""
+        self._ensure_connected()
         
-        Args:
-            call_id: 电话记录ID
-            
-        Returns:
-            bool: 操作是否成功
-        """
-        try:
-            key = f"{self.CALL_RECORD_PREFIX}{call_id}"
-            result = self.redis_client.delete(key)
-            
-            if result:
-                logger.info(f"删除电话记录成功: {call_id}")
-                return True
-            else:
-                logger.warning(f"电话记录不存在: {call_id}")
-                return False
-        except Exception as e:
-            logger.error(f"删除电话记录失败: {e}")
-            return False
-    
-    def get_call_records_by_phone(self, phone_number: str) -> List[CallRecord]:
-        """
-        根据电话号码获取电话记录
+        # 从Redis获取对话记录
+        call_record = self.get_call_record(call_id)
         
-        Args:
-            phone_number: 电话号码
-            
-        Returns:
-            List[CallRecord]: 匹配的电话记录列表
-        """
-        try:
-            all_records = self.get_all_call_records()
-            matching_records = [
-                record for record in all_records 
-                if record.phone_number == phone_number
-            ]
-            
-            logger.info(f"根据电话号码获取记录成功: {phone_number}, 共 {len(matching_records)} 条")
-            return matching_records
-        except Exception as e:
-            logger.error(f"根据电话号码获取记录失败: {e}")
-            return []
-    
+        if not call_record or not call_record.dialog_record:
+            return "客户没有说话"
+        
+        # 如果对话记录为空，返回"客户没有说话"
+        if not len(call_record.dialog_record) > call_record.dialog_record_reply_marking:
+            return "客户没有说话"
+        
+        # 获取标记位置之后的所有记录
+        new_records = call_record.dialog_record[call_record.dialog_record_reply_marking:]
+        
+        # 组合对话记录为字符串
+        dialog_text = ""
+        for entry in new_records:
+            dialog_text += entry.content
+        
+        # 更新回复标记为下一个位置
+        call_record.dialog_record_reply_marking = call_record.dialog_record_reply_marking + len(new_records)
+        
+        # 保存更新后的记录到 Redis
+        self.update_call_record(call_record)
+        
+        return dialog_text.strip()
+
     # ==================== 私有工具方法 ====================
     
     def _get_current_time(self) -> str:
@@ -418,8 +473,26 @@ class RedisService:
         from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+# ==================== 全局实例和生命周期管理 ====================
+
 # 创建全局 Redis 服务实例
 redis_service = RedisService()
 
-# 导出
-__all__ = ["redis_service", "DeviceInfo", "Device", "CallRecord"]
+def get_redis_service() -> RedisService:
+    """获取 Redis 服务实例"""
+    return redis_service
+
+@asynccontextmanager
+async def lifespan(app):
+    # 启动时初始化 Redis
+    success = redis_service.startup()
+    if not success:
+        logger.error("Redis 启动失败，应用可能无法正常工作")
+        # 根据需要决定是否抛出异常
+        # raise RuntimeError("Redis 启动失败")
+    
+    yield
+    
+    # 关闭时清理 Redis
+    redis_service.shutdown()

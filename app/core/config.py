@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     redis_ssl: bool = Field(default=False, description="Redis SSL")
     redis_decode_responses: bool = Field(default=True, description="Redis decode responses")
     
+    # WebSocket Configuration
+    websocket_ping_interval: int = Field(default=20, description="WebSocket ping interval in seconds")
+    websocket_ping_timeout: int = Field(default=5, description="WebSocket ping timeout in seconds")
+    websocket_heartbeat_interval: int = Field(default=25, description="WebSocket heartbeat interval in seconds")
+    websocket_connection_timeout: int = Field(default=60, description="WebSocket connection timeout in seconds")
+    websocket_max_reconnect_attempts: int = Field(default=5, description="WebSocket max reconnect attempts")
+    websocket_reconnect_delay: int = Field(default=2, description="WebSocket reconnect delay in seconds")
+    websocket_max_reconnect_delay: int = Field(default=60, description="WebSocket max reconnect delay in seconds")
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
