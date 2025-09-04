@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     websocket_reconnect_delay: int = Field(default=2, description="WebSocket reconnect delay in seconds")
     websocket_max_reconnect_delay: int = Field(default=60, description="WebSocket max reconnect delay in seconds")
     
+    # EventBus Configuration
+    worker_count: int = Field(default=4, description="Number of event processing workers")
+    max_queue_size: int = Field(default=1000, description="Maximum size of each event queue")
+    dead_letter_queue_size: int = Field(default=100, description="Maximum size of dead letter queue")
+    default_timeout: float = Field(default=30.0, description="Default event timeout in seconds")
+    max_retry_count: int = Field(default=3, description="Maximum number of event retries")
+    retry_delay: float = Field(default=1.0, description="Base delay between retries in seconds")
+    health_check_interval: int = Field(default=30, description="Health check interval in seconds")
+    enable_persistence: bool = Field(default=True, description="Enable event persistence to disk")
+    persistence_path: str = Field(default="./logs/events", description="Path for event persistence")
+    
     class Config:
         env_file = ".env"
         case_sensitive = False

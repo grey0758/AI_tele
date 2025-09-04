@@ -10,7 +10,7 @@ from websocket import create_connection
 import websocket
 from urllib.parse import quote
 import pyaudio
-from typing import Optional, Callable, Dict, Any
+from typing import Dict, Any
 from celery import current_app
 from app.core.config import settings
 from app.services.celery_service import get_celery_app
@@ -23,7 +23,7 @@ from app.core.logger import get_logger
 # 获取模块级别的logger
 logger = get_logger(__name__)
 
-class RtasrClient:
+class RtasrService:
     """简化的 RTASR 客户端 - 专注于连接管理"""
     
     def __init__(self):
@@ -176,15 +176,6 @@ class RtasrClient:
             "timestamp": datetime.now().isoformat()
         }
 
-rtasr_client = RtasrClient()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-    rtasr_client.close()
-
-def get_rtasr_client() -> RtasrClient:
-    return rtasr_client
 
 # =================== Celery 任务 ====================
 

@@ -4,13 +4,16 @@ from calendar import c
 from contextlib import asynccontextmanager
 import json
 import logging
-from typing import Dict, Any
+from tkinter import EventType
+from typing import Dict, Any, Optional
 from celery import current_app
 from fastapi import FastAPI
 from websockets import connect
 from websockets.exceptions import ConnectionClosed
 from app.api.v1.endpoints.aicall import CallRequest
-from app.services.redis_service import DeviceInfo, Device
+from app.core.event_bus import ProductionEventBus
+from app.services.base_service import BaseService
+from app.services.redis_service import DeviceInfo, Device, RedisService
 from app.services.redis_service import get_redis_service
 
 redis_service = get_redis_service()
@@ -21,24 +24,51 @@ from app.core.logger import get_logger
 # 获取模块级别的logger
 logger = get_logger(__name__)
 
-class PhoneService:
-    """简化的电话控制器 - 使用 Celery 任务管理"""
+
+class PhoneService(BaseService):
+    """电话服务"""
     
-    def __init__(self):
+    def __init__(self, event_bus: Optional[ProductionEventBus] = None, redis_service: Optional[RedisService] = None):
+        super().__init__(event_bus, "phone_service")
         self.ws_url = "ws://127.0.0.1:9898/ws"
         self.websocket = None
         self.should_stop = False
         self._service_task = None
         self.tts_opening = ""
         self._is_running = False
-        
+        self.redis_service = redis_service
     
-    async def start(self):
-        """手动启动服务"""
+    async def initialize(self):
         if not self._is_running:
             self._service_task = asyncio.create_task(self._start_service())
             self._is_running = True
             logger.info("PhoneService 已启动")
+        
+    async def register_event_listeners(self):
+        """推荐：直接注册模式"""
+        if not self.event_bus:
+            return
+        
+        # 清晰、直接、易维护
+        await self._register_listener(EventType.TTS_COMPLETED, self.handle_tts_completed, 1)
+        await self._register_listener(EventType.AI_RESPONSE_READY, self.handle_ai_response, 2)
+        await self._register_listener(EventType.CALL_ENDED, self.handle_call_ended, 1)
+    
+        
+    async def _register_listener(self, event_type, handler, priority, **kwargs):
+        """辅助方法：减少重复代码"""
+        try:
+            self.event_bus.register_listener(
+                event_type=event_type,
+                handler=handler,
+                priority=priority,
+                name=f"{self.service_name}_{handler.__name__}",
+                **kwargs
+            )
+            logger.info(f"✅ {self.service_name}: 注册监听器 {event_type.value}")
+        except Exception as e:
+            logger.error(f"❌ {self.service_name}: 注册监听器失败 {event_type.value}", error=str(e))
+            raise
     
     async def _start_service(self):
         """启动服务：连接 WebSocket 并开始监听消息"""
@@ -133,9 +163,9 @@ class PhoneService:
             logger.error(f"Failed to send message: {e}")
             return False
     
-    def dial_phone_sync(self, call_request: CallRequest) -> Dict[str, Any]:
+    def handle_call_out(self, call_request: CallRequest) -> Dict[str, Any]:
         """
-        拨打电话（同步版本，用于Celery任务）
+        拨打电话
         
         Args:
             phone_number: 要拨打的电话号码
@@ -147,6 +177,7 @@ class PhoneService:
         """
         try:
             # 构建拨号消息
+            call_request.instance = redis_service.get_default_device_instance(call_request.instance) if call_request.instance == 0 else call_request.instance
             dial_message = {
                 "method": "call",
                 "instance": call_request.instance,

@@ -1,100 +1,17 @@
-from contextlib import asynccontextmanager
+
+from datetime import datetime
 import redis
 import json
-import logging
-import uuid
 from typing import Optional, Dict, Any, List
-from dataclasses import dataclass, asdict, field
 from app.core.config import settings
+from app.schemas.call_record import CallRecord
+
 
 # 使用主应用的logger
 from app.core.logger import get_logger
+from app.schemas.device_info import DeviceInfo
 
 logger = get_logger(__name__)
-
-@dataclass
-class Device:
-    """设备信息数据类"""
-    id: int
-    instance: int
-    model: int
-    btConnect: int
-    btDeviceName: str
-    phoneName: str
-    deviceId: str
-    userId: str
-    firmWareVer: str
-    valid: int
-    error: str
-
-@dataclass
-class DeviceInfo:
-    """设备信息主数据类"""
-    notify: str
-    devid: str
-    version: str
-    recordmode: int
-    devices: List[Device]
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return asdict(self)
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'DeviceInfo':
-        """从字典创建实例"""
-        devices = [Device(**device) for device in data.get('devices', [])]
-        return cls(
-            notify=data.get('notify', ''),
-            devid=data.get('devid', ''),
-            version=data.get('version', ''),
-            recordmode=data.get('recordmode', 0),
-            devices=devices
-        )
-
-@dataclass
-class DialogEntry:
-    """对话记录数据类"""
-    speaker: str
-    content: str
-    timestamp: str
-
-@dataclass
-class CallRecord:
-    """电话记录数据类"""
-    call_id: str
-    phone_number: str
-    call_type: str
-    status: str
-    start_time: str
-    end_time: Optional[str] = None
-    duration: Optional[int] = None
-    device_instance: Optional[int] = None
-    dialog_record: List[DialogEntry] = field(default_factory=list)
-    dialog_record_reply_marking: Optional[int] = 0
-    notes: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return asdict(self)
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'CallRecord':
-        """从字典创建实例"""
-        dialog_record = [DialogEntry(**entry) for entry in data.get('dialog_record', [])]
-        return cls(
-            call_id=data.get('call_id', ''),
-            phone_number=data.get('phone_number', ''),
-            call_type=data.get('call_type', ''),
-            status=data.get('status', ''),
-            start_time=data.get('start_time', ''),
-            end_time=data.get('end_time'),
-            duration=data.get('duration'),
-            device_instance=data.get('device_instance'),
-            dialog_record=dialog_record,
-            dialog_record_reply_marking=data.get('dialog_record_reply_marking', 0),
-            notes=data.get('notes')
-        )
 
 class RedisService:
     """Redis 服务类 - 统一管理设备信息和电话记录"""
@@ -103,14 +20,17 @@ class RedisService:
     DEVICE_INFO_KEY = "device_info"
     CALL_RECORD_PREFIX = "call_record:"
     
-    def __init__(self):
-        """初始化 Redis 服务（延迟连接）"""
+    def __init__(self, event_bus=None):
+        """初始化 Redis 服务（支持事件总线注入）"""
         self.redis_client: Optional[redis.Redis] = None
         self._connection_pool: Optional[redis.ConnectionPool] = None
         self._initialized = False
+        self.event_bus = event_bus
+
+        self.default_device_instance = None
     
-    def startup(self) -> bool:
-        """启动时初始化 Redis 连接"""
+    async def initialize(self) -> bool:
+        """异步初始化 Redis 连接"""
         if self._initialized:
             return True
             
@@ -134,37 +54,68 @@ class RedisService:
             # 测试连接
             self.redis_client.ping()
             self._initialized = True
-            logger.info("Redis 连接成功")
+            logger.info("✅ Redis service initialized successfully")
+            
+            # 发布事件（如果有事件总线）
+            if self.event_bus:
+                await self.event_bus.publish("redis.connected", {"status": "connected"})
+            
             return True
         except Exception as e:
-            logger.error(f"Redis 连接失败: {e}")
+            logger.error(f"❌ Redis service initialization failed: {e}")
             return False
     
-    def shutdown(self):
-        """关闭时清理 Redis 连接"""
+    async def shutdown(self):
+        """异步关闭 Redis 连接"""
         try:
             if self.redis_client:
                 self.redis_client.close()
                 self.redis_client = None
-                logger.info("Redis 客户端已关闭")
+                logger.info("Redis client closed")
             
             if self._connection_pool:
                 self._connection_pool.disconnect()
                 self._connection_pool = None
-                logger.info("Redis 连接池已关闭")
+                logger.info("Redis connection pool closed")
                 
             self._initialized = False
+            
+            # 发布事件（如果有事件总线）
+            if self.event_bus:
+                await self.event_bus.publish("redis.disconnected", {"status": "disconnected"})
+                
+            logger.info("✅ Redis service shutdown completed")
         except Exception as e:
-            logger.error(f"关闭 Redis 连接时出错: {e}")
+            logger.error(f"❌ Error during Redis shutdown: {e}")
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """健康检查"""
+        try:
+            if not self._initialized or not self.redis_client:
+                return {"status": "unhealthy", "error": "Not initialized"}
+            
+            # 测试连接
+            self.redis_client.ping()
+            
+            # 获取连接信息
+            info = self.redis_client.info()
+            return {
+                "status": "healthy",
+                "connected_clients": info.get("connected_clients", 0),
+                "used_memory": info.get("used_memory_human", "unknown"),
+                "redis_version": info.get("redis_version", "unknown")
+            }
+        except Exception as e:
+            return {"status": "unhealthy", "error": str(e)}
     
     def _ensure_connected(self):
         """确保 Redis 已连接"""
         if not self._initialized or not self.redis_client:
-            raise RuntimeError("Redis 未初始化，请先调用 startup() 方法")
+            raise RuntimeError("Redis service not initialized")
     
     # ==================== 设备信息管理 ====================
     
-    def set_device_info(self, device_info: DeviceInfo) -> bool:
+    async def set_device_info(self, device_info: DeviceInfo) -> bool:
         """
         设置设备信息（创建或更新）
         
@@ -176,18 +127,18 @@ class RedisService:
         """
         self._ensure_connected()
         try:
-            device_data = device_info.to_dict()
             self.redis_client.set(
                 self.DEVICE_INFO_KEY, 
-                json.dumps(device_data, ensure_ascii=False)
+                device_info.model_dump_json(ensure_ascii=False)
             )
-            logger.info(f"设备信息已保存: devid={device_info.devid}")
+            logger.info(f"Device info saved: devid={device_info.devid}")
+            
             return True
         except Exception as e:
-            logger.error(f"保存设备信息失败: {e}")
+            logger.error(f"Failed to save device info: {e}")
             return False
     
-    def get_device_info(self) -> Optional[DeviceInfo]:
+    async def get_device_info(self) -> Optional[DeviceInfo]:
         """
         获取设备信息
         
@@ -198,18 +149,17 @@ class RedisService:
         try:
             data = self.redis_client.get(self.DEVICE_INFO_KEY)
             if not data:
-                logger.warning("设备信息不存在")
+                logger.warning("Device info not found")
                 return None
             
-            device_dict = json.loads(data)
-            device_info = DeviceInfo.from_dict(device_dict)
-            logger.info(f"获取设备信息成功: devid={device_info.devid}")
+            device_info = DeviceInfo.model_validate_json(data)
+            logger.info(f"Device info retrieved: devid={device_info.devid}")
             return device_info
         except Exception as e:
-            logger.error(f"获取设备信息失败: {e}")
+            logger.error(f"Failed to get device info: {e}")
             return None
     
-    def get_default_device_instance(self, device_index: int = 0) -> Optional[int]:
+    async def get_default_device_instance(self, device_index: int = 0) -> Optional[int]:
         """
         获取默认设备的 instance 值
         
@@ -219,25 +169,30 @@ class RedisService:
         Returns:
             int: 设备的 instance 值，不存在时返回 None
         """
+        if self.default_device_instance:
+            logger.info(f"Default device instance retrieved: {self.default_device_instance}")
+            return self.default_device_instance
+        
         self._ensure_connected()
         try:
-            device_info = self.get_device_info()
+            device_info = await self.get_device_info()
             if not device_info or not device_info.devices:
-                logger.warning("设备信息不存在或设备列表为空")
+                logger.warning("Device info not found or device list is empty")
                 return None
             
             if device_index >= len(device_info.devices):
-                logger.warning(f"设备索引 {device_index} 超出范围，设备总数: {len(device_info.devices)}")
+                logger.warning(f"Device index {device_index} out of range, total devices: {len(device_info.devices)}")
                 return None
             
             instance = device_info.devices[device_index].instance
-            logger.info(f"获取默认设备 instance 成功: {instance}")
+            self.default_device_instance = instance
+            logger.info(f"Default device instance retrieved: {instance}")
             return instance
         except Exception as e:
-            logger.error(f"获取默认设备 instance 失败: {e}")
+            logger.error(f"Failed to get default device instance: {e}")
             return None
     
-    def device_exists(self) -> bool:
+    async def device_exists(self) -> bool:
         """
         检查设备信息是否存在
         
@@ -248,10 +203,10 @@ class RedisService:
         try:
             return self.redis_client.exists(self.DEVICE_INFO_KEY) > 0
         except Exception as e:
-            logger.error(f"检查设备信息存在性失败: {e}")
+            logger.error(f"Failed to check device info existence: {e}")
             return False
     
-    def delete_device_info(self) -> bool:
+    async def delete_device_info(self) -> bool:
         """
         删除设备信息
         
@@ -262,79 +217,66 @@ class RedisService:
         try:
             result = self.redis_client.delete(self.DEVICE_INFO_KEY)
             if result:
-                logger.info("设备信息已删除")
+                logger.info("Device info deleted")
                 return True
             else:
-                logger.warning("设备信息不存在，无需删除")
+                logger.warning("Device info not found, no need to delete")
                 return False
         except Exception as e:
-            logger.error(f"删除设备信息失败: {e}")
+            logger.error(f"Failed to delete device info: {e}")
             return False
     
-    def get_device_count(self) -> int:
+    async def get_device_count(self) -> int:
         """
         获取设备数量
         
         Returns:
             int: 设备数量
         """
-        device_info = self.get_device_info()
+        device_info = await self.get_device_info()
         return len(device_info.devices) if device_info else 0
     
-    def get_all_device_instances(self) -> List[int]:
+    async def get_all_device_instances(self) -> List[int]:
         """
         获取所有设备的 instance 列表
         
         Returns:
             List[int]: 所有设备的 instance 值列表
         """
-        device_info = self.get_device_info()
+        device_info = await self.get_device_info()
         if not device_info:
             return []
         return [device.instance for device in device_info.devices]
 
     # ==================== 电话记录管理 ====================
     
-    def create_call_record(self, call_id: str, phone_number: str, call_type: str = "呼出", device_instance: Optional[int] = None, **kwargs) -> str:
+    async def create_call_record(self, call_record: CallRecord) -> str:
         """
         创建新的电话记录
         
         Args:
-            call_id: 电话记录ID
-            phone_number: 电话号码
-            call_type: 呼叫类型（呼出/呼入）
-            device_instance: 设备实例ID
-            **kwargs: 其他字段（如 dialog_record, notes 等）
+            call_record: 电话记录对象
             
         Returns:
             str: 生成的UUID
         """
         self._ensure_connected()
         try:
-            call_record = CallRecord(
-                call_id=call_id,
-                phone_number=phone_number,
-                call_type=call_type,
-                status="呼出",
-                start_time=self._get_current_time(),
-                device_instance=device_instance,
-                **kwargs
-            )
-            
-            key = f"{self.CALL_RECORD_PREFIX}{call_id}"
+            key = f"{self.CALL_RECORD_PREFIX}{call_record.call_id}"
             self.redis_client.set(
                 key,
-                json.dumps(call_record.to_dict(), ensure_ascii=False),
+                call_record.model_dump_json(ensure_ascii=False),
                 ex=86400  # 24小时过期
             )
             
-            logger.info(f"创建电话记录成功: {call_id}, 号码: {phone_number}")
-            return call_id
+            logger.info(f"Call record created: {call_record.call_id}, phone: {call_record.phone_number}")
+
+            return call_record.call_id
         except Exception as e:
-            logger.error(f"创建电话记录失败: {e}")
+            logger.error(f"Failed to create call record: {e}")
             raise
 
-    def update_call_record(self, call_record: CallRecord) -> bool:
+    async def update_call_record(self, call_record: CallRecord) -> bool:
         """
         更新电话记录（使用 CallRecord 对象）
         
@@ -347,13 +289,13 @@ class RedisService:
         self._ensure_connected()
         try:
             if not call_record.call_id:
-                logger.error("CallRecord 对象缺少 call_id")
+                logger.error("CallRecord object missing call_id")
                 return False
             
             # 获取现有记录
-            existing_record = self.get_call_record(call_record.call_id)
+            existing_record = await self.get_call_record(call_record.call_id)
             if not existing_record:
-                logger.warning(f"电话记录不存在: {call_record.call_id}")
+                logger.warning(f"Call record not found: {call_record.call_id}")
                 return False
             
             # 更新字段（只更新非 None 的字段）
@@ -365,7 +307,7 @@ class RedisService:
             
             # 如果状态是已挂断，设置结束时间和计算通话时长
             if existing_record.status == "已挂断" and not existing_record.end_time:
-                existing_record.end_time = self._get_current_time()
+                existing_record.end_time = datetime.now()
                 if existing_record.start_time:
                     # 这里可以添加时间计算逻辑
                     pass
@@ -378,13 +320,13 @@ class RedisService:
                 ex=86400  # 24小时过期
             )
             
-            logger.info(f"更新电话记录成功: {existing_record.call_id}")
+            logger.info(f"Call record updated: {existing_record.call_id}")
             return True
         except Exception as e:
-            logger.error(f"更新电话记录失败: {e}")
+            logger.error(f"Failed to update call record: {e}")
             return False
 
-    def get_call_record(self, call_id: str) -> Optional[CallRecord]:
+    async def get_call_record(self, call_id: str) -> Optional[CallRecord]:
         """
         获取电话记录
         
@@ -400,18 +342,18 @@ class RedisService:
             data = self.redis_client.get(key)
             
             if not data:
-                logger.warning(f"电话记录不存在: {call_id}")
+                logger.warning(f"Call record not found: {call_id}")
                 return None
             
             call_dict = json.loads(data)
             call_record = CallRecord.from_dict(call_dict)
-            logger.info(f"获取电话记录成功: {call_id}")
+            logger.info(f"Call record retrieved: {call_id}")
             return call_record
         except Exception as e:
-            logger.error(f"获取电话记录失败: {e}")
+            logger.error(f"Failed to get call record: {e}")
             return None
     
-    def get_all_call_records(self) -> List[CallRecord]:
+    async def get_all_call_records(self) -> List[CallRecord]:
         """获取所有电话记录"""
         self._ensure_connected()
         try:
@@ -425,18 +367,18 @@ class RedisService:
                     call_dict = json.loads(data)
                     records.append(CallRecord.from_dict(call_dict))
             
-            logger.info(f"获取所有电话记录成功，共 {len(records)} 条")
+            logger.info(f"All call records retrieved, total: {len(records)}")
             return records
         except Exception as e:
-            logger.error(f"获取所有电话记录失败: {e}")
+            logger.error(f"Failed to get all call records: {e}")
             return []
     
-    def get_dialog_after_marking(self, call_id: str) -> str:
+    async def get_dialog_after_marking(self, call_id: str) -> str:
         """获取标记后的对话记录并更新标记"""
         self._ensure_connected()
         
         # 从Redis获取对话记录
-        call_record = self.get_call_record(call_id)
+        call_record = await self.get_call_record(call_id)
         
         if not call_record or not call_record.dialog_record:
             return "客户没有说话"
@@ -457,42 +399,7 @@ class RedisService:
         call_record.dialog_record_reply_marking = call_record.dialog_record_reply_marking + len(new_records)
         
         # 保存更新后的记录到 Redis
-        self.update_call_record(call_record)
+        await self.update_call_record(call_record)
         
         return dialog_text.strip()
-
-    # ==================== 私有工具方法 ====================
     
-    def _get_current_time(self) -> str:
-        """
-        获取当前时间字符串
-        
-        Returns:
-            str: 当前时间字符串
-        """
-        from datetime import datetime
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-# ==================== 全局实例和生命周期管理 ====================
-
-# 创建全局 Redis 服务实例
-redis_service = RedisService()
-
-def get_redis_service() -> RedisService:
-    """获取 Redis 服务实例"""
-    return redis_service
-
-@asynccontextmanager
-async def lifespan(app):
-    # 启动时初始化 Redis
-    success = redis_service.startup()
-    if not success:
-        logger.error("Redis 启动失败，应用可能无法正常工作")
-        # 根据需要决定是否抛出异常
-        # raise RuntimeError("Redis 启动失败")
-    
-    yield
-    
-    # 关闭时清理 Redis
-    redis_service.shutdown()

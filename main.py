@@ -1,23 +1,40 @@
 # -*- coding: utf-8 -*-
-import asyncio
-import uvicorn
 from contextlib import asynccontextmanager
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.v1.api import api_router
+from app.core.dependencies import service_container, check_services_health
 from app.core.logger import logger
-from app.services.celery_service import lifespan
+# from app.services.celery_service import lifespan  # 已移除，使用下面的统一生命周期管理
 
-# 全局变量定义
-celery_initialized = False
-phone_controller_task = None
+# 全局处理器存储
+app_processors = {}
 
-# 导入任务模块以确保任务被注册
-import app.tasks.phone_tasks
-import app.tasks.tts_tasks
-import app.tasks.rtasr_tasks
-import app.tasks.aicall_tasks
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    print("🚀 Starting application")
+    
+    try:
+        # 初始化服务容器（包含事件总线和所有服务）
+        await service_container.initialize()
+        print("✅ All services initialized")
+        
+    except Exception as e:
+        print(f"❌ Startup failed: {e}")
+        await service_container.shutdown()
+        raise
+    
+    yield
+    
+    # 关闭阶段
+    print("🛑 Shutting down application")
+    await service_container.shutdown()
+    print("👋 Application shutdown completed")
+
+
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -39,25 +56,6 @@ app.add_middleware(
 # 注册API路由
 app.include_router(api_router, prefix="/api/v1")
 
-# 添加系统状态检查端点
-@app.get("/system/status")
-async def get_system_status():
-    """获取系统状态"""
-    from app.services.celery_service import get_celery_manager
-    
-    celery_manager = get_celery_manager()
-    celery_status = celery_manager.get_status()
-    
-    status = {
-        "celery": celery_status,
-        "phone_service": {
-            "task_id": phone_controller_task.id if phone_controller_task else None,
-            "status": "running" if phone_controller_task else "not_started"
-        }
-    }
-    
-    return status
-
 @app.get("/")
 async def root():
     """根路径"""
@@ -70,10 +68,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     """健康检查"""
-    return {
-        "status": "healthy",
-        "service": "AI电话系统"
-    }
+    return await check_services_health()
 
 if __name__ == "__main__":
     uvicorn.run(
