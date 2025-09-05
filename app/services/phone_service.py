@@ -346,8 +346,8 @@ class PhoneService(BaseService):
                             instance=data.get("instance"),
                             uuid=data.get("uuid")
                         )
-                        self.redis_service.update_call_record( call_record=self.redis_service.get_current_call_info(uuid_call_id=on_message.uuid).uuid_call_id,
-                         status="已接听" )
+                        self.redis_service.update_call_record(call_record_id=self.redis_service.get_current_call_info(uuid_call_id=on_message.uuid).uuid_call_id,
+                            call_id=on_message.uuid, status="已接听")
 
                         current_app.send_task('app.tasks.phone_tasks.handle_call_answer', args=[on_message, self.tts_opening])
                         
