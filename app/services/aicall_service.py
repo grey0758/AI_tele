@@ -6,7 +6,7 @@ from app.api.v1.endpoints.aicall import CallResponse
 from app.schemas.aicall import CallRequest
 from celery import current_app
 from app.core.logger import get_logger
-from app.schemas.call_record import CallRecord
+from app.schemas.call_record import CallRecord, CurrentCallInfo
 from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
 from app.services.redis_service import RedisService
@@ -48,21 +48,31 @@ class AicallService(BaseService):
             self.is_busy = True
             
             logger.info(f"Starting call to {call_request.phone_number} with TTS opening...")
+
+            call_request.instance = self.redis_service.get_default_device_instance(call_request.instance)
             
             # 生成通话信息
             call_record = CallRecord(
                 **call_request.model_dump(),
-                status="initiated",
+                status="to_be_dialed",
                 start_time=datetime.now(),
-                call_type="呼出",
-                device_instance=self.redis_service.get_default_device_instance(call_request.instance),
+                call_type="呼出"
             )
 
             self.redis_service.create_call_record(call_record)
 
-            logger.info(f"Call initiated to {call_request.phone_number}")
+            current_call_info = CurrentCallInfo(
+                uuid_call_record=call_record.call_id,
+                phone=call_record.phone_number,
+                instance=call_record.instance
+            )
             
+            self.redis_service.set_current_call_info(current_call_info)
+
             self.emit_event("call.out", call_record)
+
+            logger.info(f"Call initiated to {call_record.phone_number}")
+
             
             result = {
                 "success": True,
@@ -75,13 +85,13 @@ class AicallService(BaseService):
             return result
             
         except Exception as e:
-            logger.error(f"Error making call to {call_request.phone_number}: {e}")
+            logger.error(f"Error making call to {call_record.phone_number}: {e}")
             # 异步更新通话状态为失败
-            current_app.send_task('app.tasks.aicall_tasks.update_call_status_task', args=[call_request.phone_number, "failed", {"error": str(e)}])
+            current_app.send_task('app.tasks.aicall_tasks.update_call_status_task', args=[call_record.phone_number, "failed", {"error": str(e)}])
             
             result = {
                 "success": False,
-                "phone_number": call_request.phone_number,
+                "phone_number": call_record.phone_number,
                 "error": str(e),
                 "message": "Failed to complete call"
             }

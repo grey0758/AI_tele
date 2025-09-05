@@ -1,10 +1,11 @@
 
+from calendar import c
 from datetime import datetime
 import redis
 import json
 from typing import Optional, Dict, Any, List
 from app.core.config import settings
-from app.schemas.call_record import CallRecord
+from app.schemas.call_record import CallRecord, CurrentCallInfo
 
 
 # 使用主应用的logger
@@ -19,6 +20,7 @@ class RedisService:
     # Redis 键名常量
     DEVICE_INFO_KEY = "device_info"
     CALL_RECORD_PREFIX = "call_record:"
+    CURRENT_CALL_INFO_PREFIX = "current_call_info:"
     
     def __init__(self, event_bus=None):
         """初始化 Redis 服务（支持事件总线注入）"""
@@ -276,41 +278,34 @@ class RedisService:
             logger.error(f"Failed to create call record: {e}")
             raise
 
-    async def update_call_record(self, call_record: CallRecord) -> bool:
+    async def update_call_record(self, call_record: CallRecord = None, call_record_id: str = None, call_id: str = None, status: str = None) -> bool:
         """
         更新电话记录（使用 CallRecord 对象）
         
         Args:
-            call_record: 包含更新数据的 CallRecord 对象，call_id 必须存在
+            call_record: 包含更新数据的 CallRecord 对象，call_id 必须存在，status 必须存在
             
         Returns:
             bool: 操作是否成功
         """
         self._ensure_connected()
         try:
-            if not call_record.call_id:
+            if not call_record.call_id and not call_record_id and not call_id:
                 logger.error("CallRecord object missing call_id")
                 return False
             
             # 获取现有记录
-            existing_record = await self.get_call_record(call_record.call_id)
+            existing_record = await self.get_call_record(call_record_id if call_record_id else call_id if call_id else call_record.call_id)
             if not existing_record:
-                logger.warning(f"Call record not found: {call_record.call_id}")
+                logger.warning(f"Call record not found: {call_record.call_id if call_record else call_id}")
                 return False
             
-            # 更新字段（只更新非 None 的字段）
-            for field in ['status', 'phone_number', 'call_type', 'device_instance', 'dialog_record', 'dialog_record_reply_marking', 'notes']:
-                if hasattr(call_record, field):
-                    new_value = getattr(call_record, field)
-                    if new_value is not None:  # 只更新非 None 值
-                        setattr(existing_record, field, new_value)
-            
-            # 如果状态是已挂断，设置结束时间和计算通话时长
-            if existing_record.status == "已挂断" and not existing_record.end_time:
-                existing_record.end_time = datetime.now()
-                if existing_record.start_time:
-                    # 这里可以添加时间计算逻辑
-                    pass
+            if call_record:
+                existing_record = call_record
+            if status:
+                existing_record.status = status
+            if call_id and call_record_id:
+                existing_record.call_id = call_id
             
             # 保存更新后的记录
             key = f"{self.CALL_RECORD_PREFIX}{existing_record.call_id}"
@@ -403,3 +398,108 @@ class RedisService:
         
         return dialog_text.strip()
     
+    # ==================== 当前拨打电话信息管理 ====================
+
+    def _get_current_call_info_key(self, uuid_call_id: str = None, uuid_call_record: str = None) -> str:
+        """生成当前拨打电话信息的Redis键名"""
+        return self.CURRENT_CALL_INFO_PREFIX + uuid_call_id if uuid_call_id else self.CURRENT_CALL_INFO_PREFIX + uuid_call_record
+    
+    async def set_current_call_info(self, current_call_info: CurrentCallInfo) -> Optional[CurrentCallInfo]:
+        """
+        设置当前拨打电话信息（创建新的通话信息）
+        
+        Args:
+            current_call_info: 当前拨打电话信息对象
+            
+        Returns:
+            CurrentCallInfo: 创建的通话信息对象，失败时返回 None
+        """
+        self._ensure_connected()
+        try:
+            if not current_call_info.uuid_call_id or not current_call_info.uuid_call_record:
+                logger.error("CurrentCallInfo object missing uuid_call_id or uuid_call_record")
+                return None
+
+            key = self._get_current_call_info_key(current_call_info.uuid_call_id, current_call_info.uuid_call_record)
+            # 保存到 Redis
+            self.redis_client.set(
+                key, 
+                current_call_info.model_dump_json(ensure_ascii=False),
+                ex=3600  # 1小时过期，防止数据残留
+            )
+            
+            logger.info(f"Current call info set: uuid={current_call_info.uuid}, phone={current_call_info.phone}, instance={current_call_info.instance}")
+            return current_call_info
+        except Exception as e:
+            logger.error(f"Failed to set current call info: {e}")
+            return None
+    
+    async def get_current_call_info(self, uuid_call_id: str = None, uuid_call_record: str = None) -> Optional[CurrentCallInfo]:
+        """
+        获取当前拨打电话信息
+        
+        Returns:
+            CurrentCallInfo: 当前拨打电话信息对象，不存在时返回 None
+        """
+        self._ensure_connected()
+        try:
+            key = self._get_current_call_info_key(uuid_call_id, uuid_call_record)
+            data = self.redis_client.get(key)
+            if not data:
+                logger.info("No current call info found")
+                return None
+            
+            current_call_info = CurrentCallInfo.model_validate_json(data)
+            logger.info(f"Current call info retrieved: uuid={current_call_info.uuid_call_id}, phone={current_call_info.phone}, instance={current_call_info.instance}")
+            return current_call_info
+        except Exception as e:
+            logger.error(f"Failed to get current call info: {e}")
+            return None
+    
+    async def update_current_call_info(self, current_call_info: CurrentCallInfo) -> bool:
+        """
+        更新当前拨打电话信息
+        
+        Args:
+            current_call_info: 要更新的通话信息对象
+            
+        Returns:
+            bool: 操作是否成功
+        """
+        self._ensure_connected()
+        try:
+            key = self._get_current_call_info_key(current_call_info.uuid_call_id, current_call_info.uuid_call_record)
+            self.redis_client.set(
+                key, 
+                current_call_info.model_dump_json(ensure_ascii=False),
+                ex=3600  # 1小时过期，防止数据残留
+            )
+            
+            logger.info(f"Current call info updated: uuid={current_call_info.uuid_call_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update current call info: {e}")
+            return False
+    
+    async def clear_current_call_info(self, uuid_call_id: str = None, uuid_call_record: str = None) -> bool:
+        """
+        清除当前拨打电话信息
+        
+        Returns:
+            bool: 操作是否成功
+        """
+        self._ensure_connected()
+        try:
+            key = self._get_current_call_info_key(uuid_call_id, uuid_call_record)
+            result = self.redis_client.delete(key)
+            if result:
+                logger.info("Current call info cleared")
+                return True
+            else:
+                logger.info("No current call info to clear")
+                return True  # 没有数据也算成功
+        except Exception as e:
+            logger.error(f"Failed to clear current call info: {e}")
+            return False
+    
+
