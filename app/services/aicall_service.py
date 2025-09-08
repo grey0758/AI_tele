@@ -2,9 +2,8 @@
 from datetime import datetime
 import time
 from typing import Dict, Optional, Any
-from app.api.v1.endpoints.aicall import CallResponse
+from app.models.events import EventType
 from app.schemas.aicall import CallRequest
-from celery import current_app
 from app.core.logger import get_logger
 from app.schemas.call_record import CallRecord, CurrentCallInfo
 from app.services.base_service import BaseService
@@ -17,13 +16,16 @@ logger = get_logger(__name__)
 class AicallService(BaseService):
     """AI电话服务类 - 处理实际的电话拨打逻辑"""
     
-    def __init__(self, event_bus: Optional[ProductionEventBus] = None, redis_service: Optional[RedisService] = None):
+    def __init__(self, event_bus: ProductionEventBus, redis_service: RedisService):
         super().__init__(event_bus=event_bus, service_name="AicallService")
         self.redis_service = redis_service
         self.current_call = None  # 当前通话状态
         self.is_busy = False      # 是否正在通话中
     
-    def make_call(self, call_request: CallRequest) -> Dict[str, Any]:
+    async def initialize(self):
+        return True
+    
+    async def make_call(self, call_request: CallRequest) -> Dict[str, Any]:
         """
         拨打电话服务函数 - 阻塞函数，一次只能有一个电话在拨打
         
@@ -37,39 +39,39 @@ class AicallService(BaseService):
             # 检查是否已有通话在进行
             if self.is_busy:
                 logger.warning("Another call is already in progress")
-                return CallResponse(
-                    success=False,
-                    message="系统繁忙，请稍后再试",
-                    phone_number=call_request.phone_number,
-                    error="Another call is already in progress"
-                )
+                return {
+                    "success": False,
+                    "message": "系统繁忙，请稍后再试",
+                    "phone_number": call_request.phone_number,
+                    "error": "Another call is already in progress"
+                }
             
             # 设置忙碌状态
             self.is_busy = True
             
             logger.info(f"Starting call to {call_request.phone_number} with TTS opening...")
-
-            call_request.instance = self.redis_service.get_default_device_instance(call_request.instance)
             
             # 生成通话信息
             call_record = CallRecord(
                 **call_request.model_dump(),
                 status="to_be_dialed",
+                instance=await self.redis_service.get_default_device_instance(call_request.device_index),
                 start_time=datetime.now(),
                 call_type="呼出"
             )
 
-            self.redis_service.create_call_record(call_record)
+            await self.redis_service.create_call_record(call_record)
 
             current_call_info = CurrentCallInfo(
                 uuid_call_record=call_record.call_id,
                 phone=call_record.phone_number,
-                instance=call_record.instance
+                instance=call_record.instance,
+                device_index=call_request.device_index
             )
-            
-            self.redis_service.set_current_call_info(current_call_info)
 
-            self.emit_event("call.out", call_record)
+            await self.redis_service.set_current_call_info(current_call_info)
+
+            await self.emit_event(EventType.CALL_OUT, call_record)
 
             logger.info(f"Call initiated to {call_record.phone_number}")
 
@@ -85,13 +87,11 @@ class AicallService(BaseService):
             return result
             
         except Exception as e:
-            logger.error(f"Error making call to {call_record.phone_number}: {e}")
-            # 异步更新通话状态为失败
-            current_app.send_task('app.tasks.aicall_tasks.update_call_status_task', args=[call_record.phone_number, "failed", {"error": str(e)}])
+            logger.error(f"Error making call to {call_request.phone_number}: {e}")
             
             result = {
                 "success": False,
-                "phone_number": call_record.phone_number,
+                "phone_number": call_request.phone_number,
                 "error": str(e),
                 "message": "Failed to complete call"
             }

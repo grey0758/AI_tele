@@ -1,23 +1,22 @@
 # app/services/phone_service.py
 import asyncio
-from contextlib import asynccontextmanager
-import datetime
+from datetime import datetime
 from enum import Enum
 import json
+from re import S
+from app.models.events import Event
 
 from pydantic import BaseModel, Field
 from app.models.events import EventListener, EventType
-from typing import Dict, Any, Optional
-from celery import current_app
-from fastapi import FastAPI
+from typing import Annotated, Dict, Any, Optional
+
 from websockets import connect
 from websockets.exceptions import ConnectionClosed
-from app.api.v1.endpoints.aicall import CallRequest
 from app.core.event_bus import ProductionEventBus
-from app.schemas.call_record import CallRecord, CurrentCallInfo
+from app.schemas.call_record import CallRecord
+from app.schemas.device_info import Device
 from app.services.base_service import BaseService
-from app.services.redis_service import DeviceInfo, Device, RedisService
-from app.services.redis_service import get_redis_service
+from app.services.redis_service import DeviceInfo, RedisService
 
 
 # 使用统一日志管理器
@@ -26,27 +25,27 @@ from app.core.logger import get_logger
 # 获取模块级别的logger
 logger = get_logger(__name__)
 
-class SendMessageType(Enum):
-    CALL = "call"
-    HANGUP = "hangup"
+# class SendMessageType(Enum):
+#     CALL = "call"
+#     HANGUP = "hangup"
 
 class SendMessage(BaseModel):
-    method: Optional[SendMessageType] = Field(..., description="方法")
-    instance: Optional[int] = Field(..., description="设备实例")
-    phone: Optional[str] = Field(..., description="电话号码")
-    CustomId: Optional[str] = Field(default=None, description="自定义ID", exclude=True)
+    method: Annotated[str, Field(description="方法")]
+    instance: Annotated[int, Field(description="设备实例")]
+    phone: Annotated[str, Field(description="电话号码")]
+    CustomId: Annotated[str | None, Field(default=None, description="自定义ID", exclude=True)]
 
 class OnMessageType(BaseModel):
-    notify: Optional[str] = Field(default=None, description="通知类型")
-    id: Optional[str] = Field(default=None, description="设备ID")
-    instance: Optional[str] = Field(default=None, description="设备实例")
-    uuid: Optional[int] = Field(..., description="通话唯一标识")
+    notify: Annotated[str | None, Field(default=None, description="通知类型")]
+    id: Annotated[int | None, Field(default=None, description="设备ID")]
+    instance: Annotated[int | None, Field(default=None, description="设备实例")]
+    uuid: Annotated[str, Field(description="通话唯一标识")]
 
 class PhoneService(BaseService):
     """电话服务"""
     
     def __init__(self, event_bus: Optional[ProductionEventBus] = None, redis_service: Optional[RedisService] = None):
-        super().__init__(event_bus, "phone_service")
+        super().__init__(event_bus, "PhoneService")
         self.ws_url = "ws://127.0.0.1:9898/ws"
         self.websocket = None
         self.should_stop = False
@@ -56,21 +55,22 @@ class PhoneService(BaseService):
         self.redis_service = redis_service
     
     async def initialize(self):
-        if not self._is_running:
-            self._service_task = asyncio.create_task(self._start_service())
-            self._is_running = True
-            logger.info("PhoneService 已启动")
+        try:
+            if not self._is_running:
+                self._service_task = asyncio.create_task(self._start_service())
+                self._is_running = True
+                logger.info("PhoneService 已启动")
+                return True
+        except Exception as e:
+            logger.error("PhoneService 启动失败 | error=%s", str(e))
+            return False
         
     async def register_event_listeners(self):
         """推荐：直接注册模式"""
         if not self.event_bus:
             return
         
-        # 清晰、直接、易维护
         await self._register_listener(EventType.CALL_OUT, self.handle_call_out, 1, wait_for_result=False)
-        await self._register_listener(EventType.CALL_IN, self.handle_call_in, 2)
-        await self._register_listener(EventType.CALL_END, self.handle_call_end, 1)
-    
         
     async def _register_listener(self, event_type, handler, priority, **kwargs):
         """辅助方法：减少重复代码"""
@@ -86,7 +86,7 @@ class PhoneService(BaseService):
             )
             logger.info(f"✅ {self.service_name}: 注册监听器 {event_type.value}")
         except Exception as e:
-            logger.error(f"❌ {self.service_name}: 注册监听器失败 {event_type.value}", error=str(e))
+            logger.error(f"❌ {self.service_name}: 注册监听器失败 {event_type.value} | error={str(e)}")
             raise
     
     async def _start_service(self):
@@ -167,22 +167,21 @@ class PhoneService(BaseService):
             except Exception as e:
                 logger.error(f"Error disconnecting WebSocket: {e}")
     
-    async def send_message(self, message_data: Dict) -> bool:
+    async def send_message(self, message_data: SendMessage) -> bool:
         """发送消息到 WebSocket 服务器"""
         if not self.websocket:
             logger.error("WebSocket not connected")
             return False
         
         try:
-            message_json = json.dumps(message_data)
-            await self.websocket.send(message_json)
+            await self.websocket.send(message_data.model_dump_json())
             logger.debug(f"Sent message: {message_data}")
             return True
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
             return False
     
-    def handle_call_out(self, call_record: CallRecord) -> Dict[str, Any]:
+    async def handle_call_out(self, event: Event) -> Dict[str, Any]:
         """
         拨打电话
         
@@ -195,9 +194,12 @@ class PhoneService(BaseService):
             Dict: 拨号结果
         """
         try:
+            # 从事件中提取数据
+            call_record: CallRecord = event.data
+
             # 构建拨号消息
             dial_message = SendMessage(
-                method=SendMessageType.CALL,
+                method="call",
                 instance=call_record.instance,
                 phone=call_record.phone_number,
                 CustomId=call_record.custom_id
@@ -215,12 +217,11 @@ class PhoneService(BaseService):
                     "message": "拨号失败，请检查连接状态"
                 }
 
-            self.send_message(dial_message.model_dump_json())
-
+            await self.send_message(dial_message)
             
             call_record.status = "already_dialed"  
             call_record.start_time = datetime.now()
-            self.redis_service.update_call_record(call_record)
+            await self.redis_service.update_call_record(call_record)
             
             logger.info(f"拨号消息已准备: {dial_message}")
             
@@ -238,7 +239,7 @@ class PhoneService(BaseService):
             call_record.end_time = datetime.now()
             call_record.duration = 0
             call_record.notes = str(e)
-            self.redis_service.update_call_record(call_record)
+            await self.redis_service.update_call_record(call_record)
             return {
                 "success": False,
                 "phone_number": call_record.phone_number,
@@ -287,7 +288,7 @@ class PhoneService(BaseService):
                 "error": str(e)
             }
     
-    def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
+    async def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
         try:
             logger.info("Processing OnConnect message")
 
@@ -299,12 +300,12 @@ class PhoneService(BaseService):
                 devices=[Device(**device) for device in message_data.get("devices", [])]
             )
 
-            self.redis_service.set_device_info(device_info)
+            await self.redis_service.set_device_info(device_info)
             
             return {
                 "success": True,
                 "message": "连接成功，设备信息已保存",
-                "device_info": device_info.to_dict()
+                "device_info": device_info.model_dump_json()
             }
             
         except Exception as e:
@@ -335,7 +336,7 @@ class PhoneService(BaseService):
                     
                     if notify_type == "OnConnect":
                         # 处理连接成功消息
-                        result = self.handle_on_connect_message(data)
+                        result = await self.handle_on_connect_message(data)
                         logger.info(f"OnConnect handled: {result}")
 
                     elif notify_type == "OnAnswer":
@@ -346,22 +347,26 @@ class PhoneService(BaseService):
                             instance=data.get("instance"),
                             uuid=data.get("uuid")
                         )
-                        self.redis_service.update_call_record(call_record_id=self.redis_service.get_current_call_info(uuid_call_id=on_message.uuid).uuid_call_id,
-                            call_id=on_message.uuid, status="已接听")
+                        await self.redis_service.update_call_record_call_id(instance=on_message.instance, new_call_id=on_message.uuid)
+                        await self.redis_service.update_call_record_status(call_id=on_message.uuid, status="已接听")
 
-                        current_app.send_task('app.tasks.phone_tasks.handle_call_answer', args=[on_message, self.tts_opening])
-                        
+                        record = await self.redis_service.get_call_record(on_message.uuid)
+                        tts_opening = record.tts_opening if record else ""
+                        await self.emit_event(EventType.TTS_SEND_TEXT, tts_opening)
+                        await asyncio.sleep(5)
+                        await self.emit_event(EventType.RTASR_START_AUDIO, on_message.uuid)
+
                     elif notify_type == "OnCallOut":
                         # 处理呼出事件
-                        current_app.send_task('app.tasks.phone_tasks.handle_call_out', args=[data])
+                        pass
                         
                     elif notify_type == "OnCallIn":
                         # 处理呼入事件
-                        current_app.send_task('app.tasks.phone_tasks.handle_call_in', args=[data])
+                        pass
 
                     elif notify_type == "OnHangUp":
                         # 处理挂断事件
-                        current_app.send_task('app.tasks.phone_tasks.handle_hang_up', args=[data])
+                        pass
                         
                     else:
                         logger.debug(f"Unknown notify type: {notify_type}")
@@ -377,222 +382,3 @@ class PhoneService(BaseService):
             logger.error(f"Error in message listener: {e}")
         finally:
             logger.info("Message listener stopped")
-
-
-# ==================== Celery 任务 ====================
-
-# @celery_app.task(queue='phone_queue')
-# def make_call(call_request: CallRequest):
-#     """拨打电话"""
-#     try:
-#         if call_request.instance == 0:
-#             call_request.instance = redis_service.get_default_device_instance(call_request.instance) if call_request.instance == 0 else call_request.instance
-#         asyncio.run(phone_service.dial_phone(call_request))
-#     except Exception as e:
-#         logger.error(f"Error calling phone: {e}")
-#         raise
-
-# @celery_app.task(queue='phone_queue')
-# def handle_call_out(message_data: Dict):
-#     """处理呼出事件"""
-#     try:
-#         call_uuid = message_data.get('call_uuid')
-#         if not call_uuid:
-#             logger.warning("Call out message missing call_uuid")
-#             return {"status": "error", "message": "Missing call_uuid"}
-
-#         # 获取设备实例ID
-#         device_instance = message_data.get('device_instance')
-        
-#         call_data = CallRecord(
-#             call_id=call_uuid,
-#             phone_number=message_data.get('phone_number'),
-#             call_type='呼出',
-#             status='呼出',
-#             device_instance=device_instance
-#         )
-        
-#         save_call_state.delay(call_uuid, call_data)
-        
-#         logger.info(f"Call out initiated: {call_uuid}")
-#         return {"status": "success", "call_uuid": call_uuid}
-#     except Exception as e:
-#         logger.error(f"Error handling call out: {e}")
-#         raise
-
-# @celery_app.task(queue='phone_queue')
-# def handle_call_in(message_data: Dict):
-#     """处理呼入事件"""
-#     try:
-#         call_uuid = message_data.get('call_uuid')
-#         if not call_uuid:
-#             logger.warning("Call in message missing call_uuid")
-#             return {"status": "error", "message": "Missing call_uuid"}
-        
-#         # 获取设备实例ID
-#         device_instance = message_data.get('device_instance')
-        
-#         call_data = CallRecord(
-#             call_id=call_uuid,
-#             phone_number=message_data.get('phone_number'),
-#             call_type='呼入',
-#             status='呼入',
-#             device_instance=device_instance
-#         )
-
-#         save_call_state.delay(call_uuid, call_data)
-        
-#         logger.info(f"Call in received: {call_uuid}")
-#         return {"status": "success", "call_uuid": call_uuid}
-#     except Exception as e:
-#         logger.error(f"Error handling call in: {e}")
-#         raise
-
-# @celery_app.task(queue='phone_queue')
-# def handle_hang_up(message_data: Dict):
-#     """处理挂断事件"""
-#     try:
-#         call_uuid = message_data.get('call_uuid')
-#         if not call_uuid:
-#             logger.warning("Hang up message missing call_uuid")
-#             return {"status": "error", "message": "Missing call_uuid"}
-        
-#         # 获取设备实例ID
-#         device_instance = message_data.get('device_instance')
-        
-#         call_data = CallRecord(
-#             call_id=call_uuid,
-#             phone_number=message_data.get('phone_number'),
-#             call_type='呼出',
-#             status='已挂断',
-#             device_instance=device_instance
-#         )
-
-#         update_call_state.delay(call_uuid, call_data)
-        
-#         logger.info(f"Call ended: {call_uuid}")
-#         return {"status": "success", "call_uuid": call_uuid}
-#     except Exception as e:
-#         logger.error(f"Error handling hang up: {e}")
-#         raise
-
-# @celery_app.task(bind=True, retry_backoff=True, max_retries=3)
-# def add_dialog_to_call_record(self, call_id: str, dialog_entry_data: DialogEntry):
-#     try:
-        
-#         # 验证输入参数
-#         if not call_id:
-#             raise ValueError("call_id 不能为空")
-        
-#         if not dialog_entry_data.get("speaker") or not dialog_entry_data.get("content"):
-#             raise ValueError("speaker 和 content 不能为空")
-        
-#         # 获取现有通话记录
-#         existing_record = redis_service.get_call_record(call_id)
-#         if not existing_record:
-#             raise ValueError(f"通话记录不存在: {call_id}")
-        
-#         # 创建对话记录
-#         timestamp = dialog_entry_data.get("timestamp")
-#         if not timestamp:
-#             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-#         dialog_entry = DialogEntry(
-#             speaker=dialog_entry_data["speaker"],
-#             content=dialog_entry_data["content"],
-#             timestamp=timestamp
-#         )
-        
-#         # 添加到现有记录
-#         existing_record.dialog_record.append(dialog_entry)
-        
-#         # 更新记录
-#         success = redis_service.update_call_record(existing_record)
-        
-#         if success:
-#             logger.info(f"成功添加对话记录到通话 {call_id}")
-#             return {
-#                 "success": True,
-#                 "message": "对话记录添加成功",
-#                 "call_id": call_id,
-#                 "dialog_count": len(existing_record.dialog_record)
-#             }
-#         else:
-#             raise Exception("更新通话记录失败")
-            
-#     except Exception as e:
-#         logger.error(f"添加对话记录失败: {e}")
-#         # Celery 重试机制
-#         if self.request.retries < self.max_retries:
-#             logger.info(f"任务重试中... ({self.request.retries + 1}/{self.max_retries})")
-#             raise self.retry(countdown=60, exc=e)
-        
-#         return {
-#             "success": False,
-#             "message": f"添加对话记录失败: {str(e)}",
-#             "call_id": call_id
-#         }
-
-# @celery_app.task(queue='phone_queue')
-# def handle_call_answer(message_data: Dict, tts_opening: str):
-#     """处理接听事件"""
-#     try:
-#         call_uuid = message_data.get('call_uuid')
-#         if not call_uuid:
-#             logger.warning("Call answer message missing call_uuid")
-#             return {"status": "error", "message": "Missing call_uuid"}
-
-#         celery_app.send_task('app.services.tts_service.add_tts_text', args=[tts_opening, call_uuid])
-#         celery_app.send_task('app.services.rtasr_service.start_rtasr_session', args=[call_uuid])
-#         time.sleep(5)
-#         celery_app.send_task('app.services.rtasr_service.start_audio', args=[call_uuid])
-#         return {"status": "success", "call_uuid": call_uuid}
-#     except Exception as e:
-#         logger.error(f"Error handling call answer: {e}")
-#         raise
-
-# # ==================== 数据存储任务 ====================
-
-# @celery_app.task(queue='phone_queue')
-# def save_call_state(call_uuid: str, call_data: CallRecord):
-#     """保存通话状态"""
-#     try:
-#         # 从 CallRecord 对象中提取数据
-#         phone_number = call_data.phone_number
-#         call_type = call_data.call_type
-#         device_instance = call_data.device_instance
-        
-#         redis_service.create_call_record(
-#             call_uuid, 
-#             phone_number, 
-#             call_type, 
-#             device_instance
-#         )
-#         logger.debug(f"Saving call state: {call_uuid}")
-#         return {"status": "saved", "call_uuid": call_uuid}
-#     except Exception as e:
-#         logger.error(f"Error saving call state: {e}")
-#         raise
-
-# @celery_app.task(queue='phone_queue')
-# def update_call_state(call_uuid: str, update_data: CallRecord):
-#     """更新通话状态"""
-#     try:
-#         # 从 CallRecord 对象中提取数据
-#         update_dict = {
-#             'status': update_data.status,
-#             'device_instance': update_data.device_instance
-#         }
-        
-#         # 如果有其他字段需要更新，也可以添加
-#         if hasattr(update_data, 'dialog_record') and update_data.dialog_record:
-#             update_dict['dialog_record'] = update_data.dialog_record
-#         if hasattr(update_data, 'notes') and update_data.notes:
-#             update_dict['notes'] = update_data.notes
-        
-#         redis_service.update_call_state(call_uuid, update_dict)
-#         logger.debug(f"Updating call state: {call_uuid}")
-#         return {"status": "updated", "call_uuid": call_uuid}
-#     except Exception as e:
-#         logger.error(f"Error updating call state: {e}")
-#         raise

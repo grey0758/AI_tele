@@ -1,10 +1,5 @@
 # app/services/tts_service.py
-from contextlib import asynccontextmanager
-import os
-import queue
-from fastapi import FastAPI
 import websocket
-import datetime
 import hashlib
 import base64
 import hmac
@@ -17,579 +12,640 @@ from datetime import datetime
 from time import mktime
 import pyaudio
 import threading
-from typing import Dict, Any, Callable
+from collections import deque
+from typing import Dict, Any, Optional, Callable
 from app.core.config import settings
+from app.core.event_bus import ProductionEventBus
+from app.models.events import Event, EventListener, EventType
 from app.services import conversation_service
-from app.services.redis_service import get_redis_service
-from celery import current_app
-
-# 使用主应用的logger
 from app.core.logger import get_logger
+from app.services.base_service import BaseService
+from app.services.redis_service import RedisService
 
-# 获取模块级别的logger
 logger = get_logger(__name__)
 
-redis_service = get_redis_service()
+# 常量定义
+class TtsStatus:
+    FIRST = 0
+    CONTINUE = 1
+    LAST = 2
 
-STATUS_FIRST_FRAME = 0  # 第一帧的标识
-STATUS_CONTINUE_FRAME = 1  # 中间帧标识
-STATUS_LAST_FRAME = 2  # 最后一帧的标识
-
-
-class Ws_Param(object):
-    def __init__(self):
-        self.APPID = settings.tts_appid_c
-        self.APIKey = settings.tts_apikey_c
-        self.APISecret = settings.tts_apisecret_c
-
-        # 公共参数(common)
-        self.CommonArgs = {
-            "app_id": self.APPID,
-            "status": 2
+class AudioBuffer:
+    """改进的音频缓冲区管理类 - 基于您的设计"""
+    
+    def __init__(self, max_size: int = 200):
+        self.buffer = deque(maxlen=max_size)
+        self.lock = threading.Lock()
+        self.is_active = True
+        self._stats = {
+            'chunks_added': 0,
+            'chunks_played': 0,
+            'buffer_overflows': 0,
+            'clear_count': 0
         }
-        # 业务参数(business)
-        self.BusinessArgs = {
-            "oral": {
-                "oral_level": "mid"
-            },
+        
+    def put(self, audio_data: bytes):
+        """添加音频数据到缓冲区"""
+        with self.lock:
+            if self.is_active and audio_data:
+                if len(self.buffer) >= self.buffer.maxlen - 1:
+                    self._stats['buffer_overflows'] += 1
+                    logger.warning(f"音频缓冲区接近满载: {len(self.buffer)}")
+                
+                self.buffer.append(audio_data)
+                self._stats['chunks_added'] += 1
+                
+    def get(self) -> Optional[bytes]:
+        """从缓冲区获取音频数据"""
+        with self.lock:
+            if self.buffer:
+                data = self.buffer.popleft()
+                self._stats['chunks_played'] += 1
+                return data
+            return None
+            
+    def clear(self):
+        """清空缓冲区"""
+        with self.lock:
+            cleared_count = len(self.buffer)
+            self.buffer.clear()
+            self._stats['clear_count'] += 1
+            if cleared_count > 0:
+                logger.debug(f"清空音频缓冲区，丢弃 {cleared_count} 个音频块")
+            
+    def size(self) -> int:
+        """获取缓冲区大小"""
+        with self.lock:
+            return len(self.buffer)
+            
+    def is_empty(self) -> bool:
+        """检查缓冲区是否为空"""
+        with self.lock:
+            return len(self.buffer) == 0
+            
+    def deactivate(self):
+        """停用缓冲区"""
+        with self.lock:
+            self.is_active = False
+            self.buffer.clear()
+            
+    def reactivate(self):
+        """重新激活缓冲区"""
+        with self.lock:
+            self.is_active = True
+            
+    def get_stats(self) -> Dict[str, int]:
+        """获取缓冲区统计信息"""
+        with self.lock:
+            return {
+                **self._stats,
+                'current_size': len(self.buffer),
+                'max_size': self.buffer.maxlen,
+                'utilization': len(self.buffer) / self.buffer.maxlen * 100
+            }
+
+class TtsConfig:
+    """TTS配置类"""
+    def __init__(self):
+        self.appid = settings.tts_appid_c
+        self.api_key = settings.tts_apikey_c
+        self.api_secret = settings.tts_apisecret_c
+        self.host = "cbm01.cn-huabei-1.xf-yun.com"
+        self.path = "/v1/private/mcd9m97e6"
+        
+        # 业务参数
+        self.business_params = {
+            "oral": {"oral_level": "mid", "spark_assist": 1},
             "tts": {
                 "vcn": "x5_lingyuyan_flow",
-                "volume": 50,
-                "rhy": 0,
-                "speed": 55,
-                "pitch": 50,
-                "bgs": 0,
-                "reg": 0,
-                "rdn": 0,
+                "volume": 50, "speed": 55, "pitch": 50,
                 "audio": {
-                    "encoding": "raw",
-                    "sample_rate": 24000,
-                    "channels": 1,
-                    "bit_depth": 16,
-                    "frame_size": 0
+                    "encoding": "raw", "sample_rate": 24000,
+                    "channels": 1, "bit_depth": 16
                 }
             }
         }
-
+    
     def create_url(self):
-        url = 'wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6'
+        """生成认证URL"""
         now = datetime.now()
         date = format_date_time(mktime(now.timetuple()))
-
-        signature_origin = f"host: cbm01.cn-huabei-1.xf-yun.com\ndate: {date}\nGET /v1/private/mcd9m97e6 HTTP/1.1"
-        signature_sha = hmac.new(self.APISecret.encode('utf-8'), signature_origin.encode('utf-8'),
-                                 digestmod=hashlib.sha256).digest()
-        signature_sha = base64.b64encode(signature_sha).decode(encoding='utf-8')
-
+        
+        signature_origin = f"host: {self.host}\ndate: {date}\nGET {self.path} HTTP/1.1"
+        signature_sha = hmac.new(
+            self.api_secret.encode('utf-8'), 
+            signature_origin.encode('utf-8'),
+            digestmod=hashlib.sha256
+        ).digest()
+        signature_sha = base64.b64encode(signature_sha).decode('utf-8')
+        
         authorization_origin = (
-            f'api_key="{self.APIKey}", '
-            f'algorithm="hmac-sha256", '
-            f'headers="host date request-line", '
-            f'signature="{signature_sha}"'
+            f'api_key="{self.api_key}", algorithm="hmac-sha256", '
+            f'headers="host date request-line", signature="{signature_sha}"'
         )
         authorization = base64.b64encode(authorization_origin.encode('utf-8')).decode('utf-8')
         
-        v = {
+        params = urlencode({
             "authorization": authorization,
             "date": date,
-            "host": "cbm01.cn-huabei-1.xf-yun.com"
-        }
-        url = url + '?' + urlencode(v)
-        return url
+            "host": self.host
+        })
+        
+        return f"wss://{self.host}{self.path}?{params}"
 
-    def create_data_frame(self, text, status, seq):
-        """创建数据帧"""
-        return {
-            "text": {
-                "encoding": "utf8",
-                "compress": "raw",
-                "format": "plain",
-                "status": status,
-                "seq": seq,
-                "text": base64.b64encode(text.encode('utf-8')).decode()
-            }
-        }
-
-
-class TtsService:
-    """全局TTS服务，保持长连接"""
+class SmartAudioPlayer:
+    """智能音频播放器 - 基于您的缓冲器设计"""
     
-    def __init__(self):
+    def __init__(self, sample_rate: int = 24000, chunk_size: int = 512):
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        
+        # 音频设备
         self.p = None
         self.stream = None
-        self.wsParam = Ws_Param()
-        self.ws = None
-        self.stopped = False
-        self.session_started = False
-        self.seq = 0
-        self.is_first_frame = True
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = settings.websocket_max_reconnect_attempts
-        self.reconnect_delay = settings.websocket_reconnect_delay
-        self.max_reconnect_delay = settings.websocket_max_reconnect_delay
-        self.last_activity = time.time()  # 最后活动时间
-        self.heartbeat_interval = settings.websocket_heartbeat_interval
-        self.connection_timeout = settings.websocket_connection_timeout
-
-        # 添加缺失的属性
-        self.synthesis_complete = False
-        self.call_id = None
-
-        self.audio_queue = queue.Queue()
-        self.audio_thread = None
-        self.audio_playing = False
         
-        # 线程锁，确保线程安全
-        self.lock = threading.Lock()
+        # 缓冲区系统
+        self.audio_buffer = AudioBuffer(max_size=200)
         
-        # 连接状态回调
-        self.on_connected_callbacks = []
-        self.on_disconnected_callbacks = []
+        # 播放控制
+        self.playing = False
+        self.playback_active = threading.Event()
+        self.playback_active.set()
         
-        # 心跳线程
-        self.heartbeat_thread = None
-        self.heartbeat_running = False
+        # 工作线程
+        self.playback_thread = None
+        self.monitor_thread = None
         
-        # 自动启动
-        self._initialize()
-
-    def _initialize(self):
-        """初始化服务"""
-        try:
-            logger.info("初始化全局TTS服务")
-            self._init_audio()
-            self._connect()
-        except Exception as e:
-            logger.error(f"TTS服务初始化失败: {e}")
-
-    def _init_audio(self):
-        """初始化音频播放"""
-        try:
-            if self.p is None:
-                self.p = pyaudio.PyAudio()
-            
-            if self.stream is None or not self.stream.is_active():
-                if self.stream:
-                    self.stream.close()
-                
-                self.stream = self.p.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=24000,
-                    output=True,
-                    frames_per_buffer=512
-                )
-                logger.info("音频流初始化成功")
-        except Exception as e:
-            logger.error(f"音频流初始化失败: {e}")
-            raise
-
-    def _connect(self):
-        """建立WebSocket连接"""
-        if self.session_started:
-            logger.info("WebSocket已连接，跳过重连")
-            return
-
-        try:
-            websocket.enableTrace(False)
-            wsUrl = self.wsParam.create_url()
-            
-            self.ws = websocket.WebSocketApp(
-                wsUrl,
-                on_message=self._on_message,
-                on_error=self._on_error,
-                on_close=self._on_close,
-                on_open=self._on_open
-            )
-            
-            # 在后台线程中启动WebSocket连接
-            ws_thread = threading.Thread(target=self._run_websocket, daemon=True, name="TTS-WebSocket")
-            ws_thread.start()
-            
-            logger.info("WebSocket连接启动中...")
-            
-        except Exception as e:
-            logger.error(f"WebSocket连接失败: {e}")
-            self._schedule_reconnect()
-
-    def _run_websocket(self):
-        """在后台线程中运行WebSocket"""
-        try:
-            # 优化WebSocket参数，移除可能导致问题的ping_payload
-            self.ws.run_forever(
-                sslopt={"cert_reqs": ssl.CERT_NONE},
-                ping_interval=30,  # 增加ping间隔
-                ping_timeout=10,   # 增加ping超时
-                skip_utf8_validation=True  # 跳过UTF-8验证以提高性能
-            )
-        except Exception as e:
-            logger.error(f"WebSocket运行异常: {e}")
-            if not self.stopped:
-                self._schedule_reconnect()
-
-    def _on_open(self, ws):
-        """WebSocket连接打开"""
-        with self.lock:
-            self.session_started = True
-            self.reconnect_attempts = 0
-            self.seq = 0
-            self.is_first_frame = True
-            self.last_activity = time.time()
-            
-        logger.info("WebSocket连接已建立")
+        # 打断处理
+        self.interrupt_lock = threading.Lock()
+        self.is_interrupted = False
         
-        # 启动心跳线程
-        self._start_heartbeat()
+        # 回调函数
+        self.on_buffer_status: Optional[Callable[[Dict], None]] = None
         
-        # 调用连接回调
-        for callback in self.on_connected_callbacks:
-            try:
-                callback()
-            except Exception as e:
-                logger.error(f"连接回调执行失败: {e}")
-
-    def _on_message(self, ws, message):  # 修正：添加ws参数
-        try:
-            # 更新最后活动时间
-            self.last_activity = time.time()
-            
-            data = json.loads(message)
-            logger.debug(f"收到WebSocket消息: {data}")
-            
-            if "header" in data and "status" in data["header"]:
-                status = data["header"]["status"]
-                if status == 2:  # 合成结束状态
-                    self.synthesis_complete = True
-                    logger.info("TTS合成完成")
-                    if hasattr(self, 'call_id') and self.call_id:
-                        try:
-                            text = conversation_service.ai_decision(redis_service.get_dialog_after_marking(self.call_id))
-                            current_app.send
-                        except Exception as e:
-                            logger.error(f"AI决策或发送文本失败: {e}")
-
-            # 修正：检查data而不是message
-            if "payload" in data and "audio" in data["payload"]:
-                audio_data = data["payload"]["audio"]
-                if "audio" in audio_data:
-                    audio = base64.b64decode(audio_data["audio"])
-                    
-                    if not self.stopped and len(audio) > 0:
-                        # 将音频数据放入队列而不是直接播放
-                        self.audio_queue.put(audio)
-                        
-                        # 确保播放线程运行
-                        if not self.audio_playing:
-                            self._start_audio_thread()
-
-        except Exception as e:
-            logger.error(f"处理WebSocket消息异常: {e}")
-
-    def _on_error(self, ws, error):
-        """WebSocket错误处理"""
-        logger.error(f"WebSocket错误: {error}")
-        # 记录错误但不立即重连，让on_close处理
-
-    def _on_close(self, ws, close_status_code, close_msg):
-        """WebSocket连接关闭"""
-        with self.lock:
-            self.session_started = False
-            
-        # 停止心跳
-        self._stop_heartbeat()
-        
-        logger.info(f"WebSocket连接已关闭: {close_status_code} - {close_msg}")
-        
-        # 调用断连回调
-        for callback in self.on_disconnected_callbacks:
-            try:
-                callback()
-            except Exception as e:
-                logger.error(f"断连回调执行失败: {e}")
-        
-        # 如果不是主动停止，则尝试重连
-        if not self.stopped:
-            self._schedule_reconnect()
-
-    def _start_heartbeat(self):
-        """启动心跳线程"""
-        if self.heartbeat_running:
-            return
-            
-        self.heartbeat_running = True
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True, name="TTS-Heartbeat")
-        self.heartbeat_thread.start()
-        logger.debug("心跳线程已启动")
-
-    def _stop_heartbeat(self):
-        """停止心跳线程"""
-        self.heartbeat_running = False
-        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
-            self.heartbeat_thread.join(timeout=1)
-        logger.debug("心跳线程已停止")
-
-    def _heartbeat_worker(self):
-        """心跳工作线程 - 移除自定义心跳消息"""
-        while self.heartbeat_running and self.session_started:
-            try:
-                time.sleep(self.heartbeat_interval)
-                
-                if not self.heartbeat_running or not self.session_started:
-                    break
-                    
-                # 检查连接是否超时
-                if time.time() - self.last_activity > self.connection_timeout:
-                    logger.warning("连接超时，主动关闭连接")
-                    if self.ws:
-                        self.ws.close()
-                    break
-                
-                # 移除自定义心跳消息发送，依赖WebSocket的ping/pong机制
-                # 这样可以避免服务器不识别的消息格式错误
-                        
-            except Exception as e:
-                logger.error(f"心跳线程异常: {e}")
-                break
-
-    def _schedule_reconnect(self):
-        """安排重连"""
-        if self.stopped or self.reconnect_attempts >= self.max_reconnect_attempts:
-            if self.reconnect_attempts >= self.max_reconnect_attempts:
-                logger.error(f"重连次数已达上限({self.max_reconnect_attempts})，停止重连")
-            return
-            
-        self.reconnect_attempts += 1
-        
-        # 使用指数退避策略，但有最大延迟限制
-        delay = min(self.reconnect_delay * (2 ** (self.reconnect_attempts - 1)), self.max_reconnect_delay)
-        
-        logger.info(f"将在 {delay} 秒后进行第 {self.reconnect_attempts} 次重连")
-        
-        def reconnect():
-            time.sleep(delay)
-            if not self.stopped:
-                logger.info(f"开始第 {self.reconnect_attempts} 次重连...")
-                self._connect()
-        
-        reconnect_thread = threading.Thread(target=reconnect, daemon=True, name=f"TTS-Reconnect-{self.reconnect_attempts}")
-        reconnect_thread.start()
-
-    def _start_audio_thread(self):
-        """启动音频播放线程"""
-        if not self.audio_thread or not self.audio_thread.is_alive():
-            self.audio_playing = True
-            self.audio_thread = threading.Thread(target=self._audio_player, daemon=True, name="TTS-AudioPlayer")
-            self.audio_thread.start()
-
-    def _audio_player(self):
-        """音频播放线程"""
-        while self.audio_playing:
-            try:
-                # 从队列中获取音频数据，超时1秒
-                audio_data = self.audio_queue.get(timeout=1)
-                if audio_data and self.stream:
-                    if not self.stream.is_active():
-                        self.stream.start_stream()
-                    self.stream.write(audio_data)
-                self.audio_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"音频播放异常: {e}")
-
-    def send_text(self, text: str) -> bool:
-        """发送文本进行TTS合成"""
-        if self.stopped or not self.session_started:
-            logger.warning("TTS服务未连接，无法发送文本")
-            return False
-
-        try:
-            with self.lock:
-                # 验证文本
-                if not text or not isinstance(text, str):
-                    logger.error("输入文本无效")
-                    return False
-                
-                cleaned_text = text.strip().replace('\n', ' ').replace('\r', ' ')
-                if len(cleaned_text) < 1:
-                    logger.error("文本长度过短")
-                    return False
-
-                # 确定帧状态
-                if self.is_first_frame:
-                    frame_status = STATUS_FIRST_FRAME
-                    header_status = STATUS_FIRST_FRAME
-                    self.is_first_frame = False
-                    logger.info(f"发送第一帧文本: {cleaned_text}")
-                else:
-                    frame_status = STATUS_CONTINUE_FRAME
-                    header_status = STATUS_CONTINUE_FRAME
-                    logger.info(f"发送文本: {cleaned_text}")
-
-                # 构建数据帧
-                data_frame = {
-                    "header": {**self.wsParam.CommonArgs, "status": header_status},
-                    "parameter": self.wsParam.BusinessArgs if self.seq == 0 else {},
-                    "payload": self.wsParam.create_data_frame(cleaned_text, frame_status, self.seq)
-                }
-                
-                # 发送数据
-                self.ws.send(json.dumps(data_frame))
-                self.seq += 1
-                
-                logger.info(f"文本发送成功，序列号: {self.seq - 1}")
-                return True
-                
-        except Exception as e:
-            logger.error(f"发送文本失败: {e}")
-            return False
-
-    def finish_session(self) -> bool:
-        """结束当前会话"""
-        if not self.session_started:
-            return True
-
-        try:
-            with self.lock:
-                # 发送结束帧
-                end_frame = {
-                    "header": {**self.wsParam.CommonArgs, "status": STATUS_LAST_FRAME},
-                    "parameter": {},
-                    "payload": {
-                        "text": {
-                            "encoding": "utf8",
-                            "compress": "raw",
-                            "format": "plain",
-                            "status": STATUS_LAST_FRAME,
-                            "seq": self.seq,
-                            "text": base64.b64encode("END".encode('utf-8')).decode()
-                        }
-                    }
-                }
-                
-                self.ws.send(json.dumps(end_frame))
-                self.seq += 1
-                
-                # 重置状态，准备下次会话
-                self.is_first_frame = True
-                
-                logger.info("会话结束帧发送成功")
-                return True
-                
-        except Exception as e:
-            logger.error(f"结束会话失败: {e}")
-            return False
-
-    def is_connected(self) -> bool:
-        """检查连接状态"""
-        return self.session_started and not self.stopped
-
-    def get_status(self) -> Dict[str, Any]:
-        """获取服务状态"""
-        return {
-            "connected": self.is_connected(),
-            "reconnect_attempts": self.reconnect_attempts,
-            "seq": self.seq,
-            "is_first_frame": self.is_first_frame,
-            "synthesis_complete": self.synthesis_complete,
-            "call_id": self.call_id,
-            "timestamp": datetime.now().isoformat()
+        # 统计信息
+        self.stats = {
+            'total_played_chunks': 0,
+            'interruptions_count': 0,
+            'playback_errors': 0,
+            'average_latency': 0.0
         }
-
-    def add_connected_callback(self, callback: Callable):
-        """添加连接成功回调"""
-        self.on_connected_callbacks.append(callback)
-
-    def add_disconnected_callback(self, callback: Callable):
-        """添加断连回调"""
-        self.on_disconnected_callbacks.append(callback)
-
-    def set_call_id(self, call_id: str):
-        """设置通话ID"""
-        self.call_id = call_id
-        logger.info(f"设置通话ID: {call_id}")
-
+    
+    def initialize(self):
+        """初始化音频播放器"""
+        try:
+            self.p = pyaudio.PyAudio()
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.sample_rate,
+                output=True,
+                frames_per_buffer=self.chunk_size
+            )
+            
+            # 启动工作线程
+            self._start_playback_worker()
+            self._start_monitor_worker()
+            
+            logger.info("智能音频播放器初始化成功")
+            
+        except Exception as e:
+            logger.error(f"音频播放器初始化失败: {e}")
+            raise
+    
+    def _start_playback_worker(self):
+        """启动播放工作线程"""
+        def playback_worker():
+            logger.info("音频播放工作线程已启动")
+            self.playing = True
+            
+            while self.playing:
+                try:
+                    # 等待播放激活信号
+                    if not self.playback_active.wait(timeout=0.1):
+                        continue
+                    
+                    # 检查打断状态
+                    with self.interrupt_lock:
+                        if self.is_interrupted:
+                            time.sleep(0.01)
+                            continue
+                    
+                    # 从缓冲区获取音频数据
+                    audio_data = self.audio_buffer.get()
+                    if audio_data and self.stream:
+                        start_time = time.time()
+                        self.stream.write(audio_data)
+                        
+                        # 更新统计
+                        self.stats['total_played_chunks'] += 1
+                        latency = time.time() - start_time
+                        self.stats['average_latency'] = (
+                            self.stats['average_latency'] * 0.9 + latency * 0.1
+                        )
+                    else:
+                        time.sleep(0.001)  # 缓冲区为空时短暂休眠
+                        
+                except Exception as e:
+                    logger.error(f"播放工作线程错误: {e}")
+                    self.stats['playback_errors'] += 1
+                    time.sleep(0.01)
+            
+            logger.info("音频播放工作线程已停止")
+        
+        self.playback_thread = threading.Thread(target=playback_worker, daemon=True)
+        self.playback_thread.start()
+    
+    def _start_monitor_worker(self):
+        """启动监控工作线程"""
+        def monitor_worker():
+            logger.info("缓冲区监控线程已启动")
+            
+            while self.playing:
+                try:
+                    status = self.get_status()
+                    
+                    # 检查缓冲区状态
+                    if status['buffer_utilization'] > 90:
+                        logger.warning(f"缓冲区使用率过高: {status['buffer_utilization']:.1f}%")
+                    
+                    # 触发状态回调
+                    if self.on_buffer_status:
+                        self.on_buffer_status(status)
+                    
+                    time.sleep(1.0)  # 每秒监控一次
+                    
+                except Exception as e:
+                    logger.error(f"监控线程错误: {e}")
+                    time.sleep(1.0)
+            
+            logger.info("缓冲区监控线程已停止")
+        
+        self.monitor_thread = threading.Thread(target=monitor_worker, daemon=True)
+        self.monitor_thread.start()
+    
+    def add_audio(self, audio_data: bytes):
+        """添加音频数据"""
+        if not self.is_interrupted:
+            self.audio_buffer.put(audio_data)
+    
+    def interrupt_playback(self):
+        """打断播放 - 改进版"""
+        with self.interrupt_lock:
+            if self.is_interrupted:
+                return
+            
+            logger.info("执行智能打断...")
+            self.is_interrupted = True
+            self.stats['interruptions_count'] += 1
+            
+            # 1. 暂停播放
+            self.playback_active.clear()
+            
+            # 2. 清空缓冲区
+            self.audio_buffer.clear()
+            
+            # 3. 重置音频流
+            self._reset_audio_stream()
+            
+            # 4. 短暂延迟后重新激活
+            threading.Timer(0.05, self._reactivate_playback).start()
+    
+    def _reset_audio_stream(self):
+        """重置音频流"""
+        try:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+            
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.sample_rate,
+                output=True,
+                frames_per_buffer=self.chunk_size
+            )
+            logger.debug("音频流已重置")
+            
+        except Exception as e:
+            logger.error(f"重置音频流失败: {e}")
+    
+    def _reactivate_playback(self):
+        """重新激活播放"""
+        with self.interrupt_lock:
+            self.is_interrupted = False
+            self.playback_active.set()
+            logger.info("播放已重新激活")
+    
+    def get_status(self) -> Dict[str, Any]:
+        """获取播放器状态"""
+        buffer_stats = self.audio_buffer.get_stats()
+        return {
+            **buffer_stats,
+            # 兼容调用方期望的键名，避免 KeyError
+            'buffer_utilization': buffer_stats.get('utilization', 0),
+            'is_playing': self.playing,
+            'is_interrupted': self.is_interrupted,
+            'playback_active': self.playback_active.is_set(),
+            'player_stats': self.stats.copy()
+        }
+    
     def stop(self):
-        """停止服务"""
-        logger.info("正在停止TTS服务...")
-        self.stopped = True
+        """停止播放器"""
+        logger.info("停止智能音频播放器...")
+        self.playing = False
+        self.playback_active.clear()
+        self.audio_buffer.deactivate()
         
-        # 停止心跳线程
-        self._stop_heartbeat()
+        # 等待线程结束
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.playback_thread.join(timeout=2)
         
-        # 关闭WebSocket连接
-        if self.ws:
-            try:
-                self.ws.close()
-            except Exception as e:
-                logger.error(f"关闭WebSocket异常: {e}")
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=2)
         
-        # 停止音频播放
-        self.audio_playing = False
-        if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=2)
-        
-        # 关闭音频流
+        # 关闭音频设备
         if self.stream:
             try:
-                if self.stream.is_active():
-                    self.stream.stop_stream()
                 self.stream.close()
-            except Exception as e:
-                logger.error(f"关闭音频流异常: {e}")
+            except: pass
         
-        # 关闭PyAudio
         if self.p:
             try:
                 self.p.terminate()
-            except Exception as e:
-                logger.error(f"关闭PyAudio异常: {e}")
-        
-        # 重置状态
-        with self.lock:
-            self.session_started = False
-            self.reconnect_attempts = 0
-        
-        logger.info("TTS服务已停止")
+            except: pass
 
-    def restart(self):
-        """重启服务"""
-        logger.info("重启TTS服务...")
-        self.stop()
+class TtsService(BaseService):
+    """优化的TTS服务 - 集成智能音频缓冲器"""
+    
+    def __init__(self, event_bus: ProductionEventBus, redis_service: RedisService):
+        super().__init__(event_bus, "TtsService")
+        self.redis_service = redis_service
+        self.config = TtsConfig()
+        self.audio_player = SmartAudioPlayer()
         
-        # 等待所有资源清理完成
-        time.sleep(2)
+        # WebSocket连接
+        self.ws = None
+        self.connected = False
+        self.stopped = False
         
-        # 重置所有状态
+        # 会话状态
+        self.seq = 0
+        self.is_first_frame = True
+        self.call_id = None
+        self.synthesis_complete = False
+        
+        # 重连管理
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 3
+        
+        # 线程锁
+        self.lock = threading.Lock()
+        
+        # 设置音频播放器回调
+        self.audio_player.on_buffer_status = self._on_buffer_status_changed
+    
+    async def initialize(self):
+        """初始化服务"""
+        try:
+            self.audio_player.initialize()
+            self._connect()
+            logger.info("优化版TTS服务启动成功")
+            return True
+        except Exception as e:
+            logger.error(f"TTS服务启动失败: {e}")
+            return False
+    
+    async def register_event_listeners(self):
+        """注册事件监听器"""
+        if self.event_bus:
+            # TTS文本发送
+            self.event_bus.register_listener(
+                EventListener(
+                    event_type=EventType.TTS_SEND_TEXT,
+                    handler=self.handle_tts_send_text,
+                    priority=1,
+                    name=f"{self.service_name}_handle_tts_send_text"
+                )
+            )
+            
+            # 可以添加打断事件监听
+            # self.event_bus.register_listener(
+            #     EventListener(
+            #         event_type=EventType.TTS_INTERRUPT,
+            #         handler=self.handle_interrupt,
+            #         priority=1,
+            #         name=f"{self.service_name}_handle_interrupt"
+            #     )
+            # )
+    
+    def _connect(self):
+        """建立WebSocket连接"""
+        if self.connected:
+            return
+        
+        try:
+            url = self.config.create_url()
+            self.ws = websocket.WebSocketApp(
+                url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close
+            )
+            
+            threading.Thread(
+                target=lambda: self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}),
+                daemon=True,
+                name="TTS-WebSocket"
+            ).start()
+            
+        except Exception as e:
+            logger.error(f"WebSocket连接失败: {e}")
+    
+    def _on_open(self, ws):
+        """连接建立"""
         with self.lock:
-            self.stopped = False
-            self.session_started = False
+            self.connected = True
             self.reconnect_attempts = 0
             self.seq = 0
             self.is_first_frame = True
-            self.last_activity = time.time()
-            self.heartbeat_running = False
-            self.synthesis_complete = False
+        logger.info("TTS WebSocket连接已建立")
+    
+    def _on_message(self, ws, message):
+        """处理消息"""
+        try:
+            data = json.loads(message)
+            
+            # 检查错误
+            if data.get("header", {}).get("code", 0) != 0:
+                logger.error(f"TTS错误: {data['header'].get('message', '未知错误')}")
+                return
+            
+            # 处理音频数据
+            audio_data = data.get("payload", {}).get("audio", {}).get("audio")
+            if audio_data:
+                decoded_audio = base64.b64decode(audio_data)
+                self.audio_player.add_audio(decoded_audio)
+            
+            # 检查合成状态
+            if data.get("header", {}).get("status") == TtsStatus.LAST:
+                self.synthesis_complete = True
+                logger.info("TTS合成完成")
+                self._handle_synthesis_complete()
+                
+        except Exception as e:
+            logger.error(f"处理TTS消息异常: {e}")
+    
+    def _on_error(self, ws, error):
+        """错误处理"""
+        logger.error(f"TTS WebSocket错误: {error}")
+    
+    def _on_close(self, ws, close_status_code, close_msg):
+        """连接关闭"""
+        with self.lock:
+            self.connected = False
         
-        # 重新初始化
-        self._initialize()
-        logger.info("TTS服务重启完成")
-
-
-# 创建全局实例
-tts_service = TtsService()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """FastAPI生命周期管理"""
-    # 启动时的操作
-    logger.info("FastAPI应用启动，TTS服务已初始化")
-    yield
-    # 关闭时的操作
-    logger.info("FastAPI应用关闭，正在停止TTS服务")
-    tts_service.stop()
-
-def get_tts_service() -> TtsService:
-    """获取TTS服务实例"""
-    return tts_service
-
+        logger.info(f"TTS WebSocket连接关闭: {close_status_code}")
+        
+        if not self.stopped and self.reconnect_attempts < self.max_reconnect_attempts:
+            self._reconnect()
+    
+    def _reconnect(self):
+        """重连逻辑"""
+        self.reconnect_attempts += 1
+        delay = min(2 ** self.reconnect_attempts, 30)
+        
+        def do_reconnect():
+            time.sleep(delay)
+            if not self.stopped:
+                self._connect()
+        
+        threading.Thread(target=do_reconnect, daemon=True, name="TTS-Reconnect").start()
+    
+    def _handle_synthesis_complete(self):
+        """处理合成完成"""
+        if self.call_id:
+            try:
+                dialog = self.redis_service.get_dialog_after_marking(self.call_id)
+                text = conversation_service.ai_decision(dialog)
+                if text:
+                    self.handle_tts_send_text(text)
+            except Exception as e:
+                logger.error(f"AI决策失败: {e}")
+    
+    def _on_buffer_status_changed(self, status: Dict):
+        """缓冲区状态变化回调"""
+        if status['buffer_utilization'] > 95:
+            logger.warning(f"TTS缓冲区使用率过高: {status['buffer_utilization']:.1f}%")
+    
+    def _create_frame(self, text: str, status: int) -> dict:
+        """创建数据帧"""
+        return {
+            "header": {
+                "app_id": self.config.appid,
+                "status": status
+            },
+            "parameter": self.config.business_params if self.seq == 0 else {},
+            "payload": {
+                "text": {
+                    "encoding": "utf8",
+                    "compress": "raw", 
+                    "format": "plain",
+                    "status": status,
+                    "seq": self.seq,
+                    "text": base64.b64encode(text.encode('utf-8')).decode()
+                }
+            }
+        }
+    
+    def handle_tts_send_text(self, event: Event) -> bool:
+        """发送文本进行合成"""
+        if not self.connected or self.stopped:
+            logger.warning("TTS服务未连接")
+            return False
+        
+        if not event.data or not event.data.strip():
+            logger.error("文本为空")
+            return False
+        
+        try:
+            with self.lock:
+                status = TtsStatus.FIRST if self.is_first_frame else TtsStatus.CONTINUE
+                
+                frame = self._create_frame(event.data.strip(), status)
+                self.ws.send(json.dumps(frame))
+                
+                self.seq += 1
+                self.is_first_frame = False
+                
+                logger.info(f"TTS文本发送成功: seq={self.seq-1}, status={status}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"发送TTS文本失败: {e}")
+            return False
+    
+    def handle_interrupt(self) -> bool:
+        """处理打断请求"""
+        try:
+            self.audio_player.interrupt_playback()
+            logger.info("TTS播放已被打断")
+            return True
+        except Exception as e:
+            logger.error(f"TTS打断处理失败: {e}")
+            return False
+    
+    def finish_session(self) -> bool:
+        """结束会话"""
+        if not self.connected:
+            return True
+        
+        try:
+            with self.lock:
+                frame = self._create_frame("", TtsStatus.LAST)
+                self.ws.send(json.dumps(frame))
+                self.is_first_frame = True
+                logger.info("TTS会话结束")
+                return True
+        except Exception as e:
+            logger.error(f"结束TTS会话失败: {e}")
+            return False
+    
+    def set_call_id(self, call_id: str):
+        """设置通话ID"""
+        self.call_id = call_id
+    
+    def is_connected(self) -> bool:
+        """检查连接状态"""
+        return self.connected and not self.stopped
+    
+    def get_status(self) -> Dict[str, Any]:
+        """获取服务状态"""
+        audio_status = self.audio_player.get_status()
+        return {
+            "connected": self.is_connected(),
+            "seq": self.seq,
+            "is_first_frame": self.is_first_frame,
+            "call_id": self.call_id,
+            "synthesis_complete": self.synthesis_complete,
+            "reconnect_attempts": self.reconnect_attempts,
+            "audio_player": audio_status,
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def stop(self):
+        """停止服务"""
+        logger.info("停止优化版TTS服务...")
+        self.stopped = True
+        
+        if self.ws:
+            self.ws.close()
+        
+        self.audio_player.stop()
+        
+        with self.lock:
+            self.connected = False
+            self.reconnect_attempts = 0
+        
+        logger.info("优化版TTS服务已停止")

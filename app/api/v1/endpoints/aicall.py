@@ -1,25 +1,26 @@
 from dataclasses import dataclass
+from typing import Annotated
 from celery import current_app
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field
 from app.schemas.aicall import CallRequest
-from app.services.aicall_service import get_aicall_service
-
-aicall_service = get_aicall_service()
+from app.core.dependencies import get_aicall_service
+from app.services.aicall_service import AicallService
+from app.core.logger import get_logger
 
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 class CallResponse(BaseModel):
-    success: bool
-    message: str
-    task_id: str = None
-    phone_number: str = None
-    error: str = None
-
+    success: Annotated[bool, Field(description="是否成功")]
+    message: Annotated[str | None, Field(default=None, description="消息")]
+    task_id: Annotated[str | None, Field(default=None, description="任务ID")]
+    phone_number: Annotated[str | None, Field(default=None, description="电话号码")]
+    error: Annotated[str | None, Field(default=None, description="错误")]
 
 @router.post("/make_call", response_model=CallResponse)
-async def make_call(request: CallRequest):
+async def make_call(request: CallRequest, aicall_service: AicallService = Depends(get_aicall_service)):
     """
     发起AI电话呼叫
     
@@ -30,10 +31,6 @@ async def make_call(request: CallRequest):
         CallResponse: 呼叫结果
     """
     try:
-        # 验证电话号码
-        if not request.phone_number or len(request.phone_number) < 11:
-            raise HTTPException(status_code=400, detail="无效的电话号码")
-        
         # 检查服务是否可用
         if aicall_service.is_busy:
             return CallResponse(
@@ -43,7 +40,7 @@ async def make_call(request: CallRequest):
                 error="Another call is already in progress"
             )
         
-        aicall_service.make_call(request)
+        await aicall_service.make_call(request)
         
         return CallResponse(
             success=True,
@@ -52,6 +49,7 @@ async def make_call(request: CallRequest):
         )
         
     except Exception as e:
+        logger.error(f"make_call 接口异常: {e}", exc_info=True)
         return CallResponse(
             success=False,
             message=f"发起呼叫失败: {str(e)}",
@@ -72,7 +70,7 @@ async def get_call_status(task_id: str):
         Dict: 任务状态信息
     """
     try:
-        task_result = current_app.s
+        task_result = current_app.AsyncResult(task_id)
         
         if task_result.ready():
             if task_result.successful():
@@ -100,7 +98,7 @@ async def get_call_status(task_id: str):
 
 
 @router.get("/service_status")
-async def get_service_status():
+async def get_service_status(aicall_service: AicallService = Depends(get_aicall_service)):
     """
     获取AI呼叫服务状态
     
@@ -123,7 +121,7 @@ async def get_service_status():
 
 
 @router.post("/cancel_call")
-async def cancel_call():
+async def cancel_call(aicall_service: AicallService = Depends(get_aicall_service)):
     """
     取消当前呼叫（如果正在进行）
     

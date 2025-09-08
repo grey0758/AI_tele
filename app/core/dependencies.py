@@ -53,7 +53,7 @@ class EnhancedServiceContainer:
                 logger.info("🎉 Service container initialization completed")
                 
             except Exception as e:
-                logger.error("❌ Service container initialization failed", error=str(e))
+                logger.error("❌ Service container initialization failed | error=%s", str(e))
                 await self._cleanup()
                 raise
     
@@ -62,8 +62,8 @@ class EnhancedServiceContainer:
         # 创建服务实例并注入事件总线
         self._services['redis_service'] = RedisService(self._event_bus)
         self._services['phone_service'] = PhoneService(self._event_bus, self._services['redis_service'])
-        self._services['tts_service'] = TtsService(self._event_bus)
-        self._services['rtasr_service'] = RtasrService(self._event_bus)
+        self._services['tts_service'] = TtsService(self._event_bus, self._services['redis_service'])
+        self._services['rtasr_service'] = RtasrService(self._event_bus, self._services['redis_service'])
         self._services['aicall_service'] = AicallService(self._event_bus, self._services['redis_service'])
         
         # 如果服务有异步初始化方法，调用它们
@@ -71,9 +71,9 @@ class EnhancedServiceContainer:
             if hasattr(service, 'initialize'):
                 success = await service.initialize()
                 if success:
-                    logger.info(f"✅ Service {name} initialized")
+                    logger.info("✅ Service %s initialized", name)
                 else:
-                    logger.error(f"❌ Service {name} initialization failed")
+                    logger.error("❌ Service %s initialization failed", name)
                     # 根据需要决定是否抛出异常
                     if name == 'redis_service':  # Redis 是关键服务
                         raise RuntimeError(f"Critical service {name} failed to initialize")
@@ -98,9 +98,9 @@ class EnhancedServiceContainer:
                 if hasattr(service, 'shutdown'):
                     try:
                         await service.shutdown()
-                        logger.info(f"Service {name} shutdown completed")
+                        logger.info("Service %s shutdown completed", name)
                     except Exception as e:
-                        logger.error(f"Error shutting down {name}", error=str(e))
+                        logger.error("Error shutting down %s | error=%s", name, str(e))
             
             # 2. 关闭事件总线
             if self._event_bus and self._event_bus.running:
@@ -108,7 +108,7 @@ class EnhancedServiceContainer:
                 logger.info("EventBus shutdown completed")
             
         except Exception as e:
-            logger.error("Error during shutdown", error=str(e))
+            logger.error("Error during shutdown | error=%s", str(e))
         finally:
             await self._cleanup()
     

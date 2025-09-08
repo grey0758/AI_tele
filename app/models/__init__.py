@@ -1,4 +1,4 @@
 # SQLAlchemy models package
-from app.models.user import User
+from app.models.events import Event
 
-__all__ = ["User"]
+__all__ = ["Event"]

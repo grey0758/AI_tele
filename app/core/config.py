@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     worker_count: int = Field(default=4, description="Number of event processing workers")
     max_queue_size: int = Field(default=1000, description="Maximum size of each event queue")
     dead_letter_queue_size: int = Field(default=100, description="Maximum size of dead letter queue")
+    default_wait_for_result: bool = Field(default=True, description="Default wait for result")
     default_timeout: float = Field(default=30.0, description="Default event timeout in seconds")
     max_retry_count: int = Field(default=3, description="Maximum number of event retries")
     retry_delay: float = Field(default=1.0, description="Base delay between retries in seconds")
