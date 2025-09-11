@@ -10,44 +10,66 @@ authors = [{name = "Your Name", email = "your.email@example.com"}]
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "fastapi>=0.116.1",
-    "uvicorn[standard]>=0.35.0",
-    "sqlalchemy>=2.0.43",
-    "alembic>=1.12.1",
+    # 核心框架
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy",
+    "alembic",
+
+    # 数据验证
     "pydantic>=2.11.7,<3.0.0",
-    "pydantic-settings>=2.1.0",
-    "python-multipart>=0.0.6",
-    "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
-    "fastapi-pagination>=0.12.8",
+    "pydantic-settings",
+
+    # Web相关
+
+    # 认证和安全
+
+    # 分页和数据库
     "mysqlclient>=2.2.0",
-    "python-dotenv>=1.0.0",
+
+    # 配置和环境
+    "python-dotenv",
+
+    # 远程连接
     "paramiko>=3.4.0",
-    "websocket-client>=1.7.0",
-    "celery>=5.3.0",
-    "redis>=4.5.0",
-    "flower>=2.0.0",
-    "dependency-injector>=4.41.0",
-    "email-validator>=2.1.0",
-    "numpy>=1.24.0",
-    "requests>=2.31.0",
+    "websocket-client",
+
+    # 任务队列
+    "redis",
+
+    # 依赖注入
+    
+
+    # 通用工具
+    "numpy",
+    "requests",
+    "rich",
+    "aiofiles",
+
+    # 音频处理
     "pyaudio>=0.2.11",
-    "aiofiles>=23.2.0",
-    "rich>=14.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4.3",
-    "pytest-asyncio>=0.21.1",
-    "httpx>=0.25.2",
-    "black>=23.11.0",
-    "isort>=5.12.0",
-    "flake8>=7.2.0",
+    # 构建工具 - 添加到开发依赖
+    "setuptools>=61.0",
+    "wheel",
+
+    # 开发工具
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "black",
+    "isort",
+    "flake8",
 ]
 audio = [
     "pyaudio>=0.2.11",
 ]
+
+[tool.uv]
+link-mode = "copy"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
@@ -55,7 +77,7 @@ exclude = ["tests*", "alembic*", "logs*", "uploads*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py38']
+target-version = ['py39']
 
 [tool.isort]
 profile = "black"
@@ -67,3 +89,8 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.1.0",
+]

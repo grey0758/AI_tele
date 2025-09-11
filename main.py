@@ -6,9 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.v1.api import api_router
 from app.core.dependencies import service_container, check_services_health
-from app.core.logger import logger
 from app.middleware.logging import logging_middleware
-# from app.services.celery_service import lifespan  # 已移除，使用下面的统一生命周期管理
 
 # 全局处理器存储
 app_processors = {}

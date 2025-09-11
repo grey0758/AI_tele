@@ -353,6 +353,7 @@ class PhoneService(BaseService):
                         record = await self.redis_service.get_call_record(on_message.uuid)
                         tts_opening = record.tts_opening if record else ""
                         await self.emit_event(EventType.TTS_SEND_TEXT, tts_opening)
+                        await self.emit_event(EventType.RTASR_START, on_message.uuid, event_id=on_message.uuid)
                         await asyncio.sleep(5)
                         await self.emit_event(EventType.RTASR_START_AUDIO, on_message.uuid)
 

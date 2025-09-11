@@ -78,7 +78,7 @@ class RtasrService(BaseService):
             logger.error(f"❌ {self.service_name}: 注册监听器失败 {event_type.value} | error={str(e)}")
             raise
 
-    def handle_rtasr_start(self, event: Event) -> bool:
+    async def handle_rtasr_start(self, event: Event) -> bool:
         self.call_id = event.data
         """创建WebSocket连接"""
         try:
@@ -232,7 +232,7 @@ class RtasrService(BaseService):
                 frames_per_buffer=1280
             )
             
-            while self.ws_connected and self.ws and self.ws.connected:
+            while self.ws_connected and self.ws.connected:
                 try:
                     if self.is_sending_audio:
                         chunk = stream.read(1280, exception_on_overflow=False)
@@ -249,6 +249,7 @@ class RtasrService(BaseService):
         except Exception as e:
             logger.error(f"RTASR音频初始化异常: {e}")
         finally:
+            logger.info(f"RTASR音频发送线程结束")
             if stream:
                 stream.stop_stream()
                 stream.close()
