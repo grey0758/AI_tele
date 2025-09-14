@@ -1,18 +1,18 @@
 from datetime import datetime
+from re import T
 import redis
 from redis.exceptions import LockError, LockNotOwnedError
-import json
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
+from app.utils.get_audio_devices import get_audio_devices
 from app.core.config import settings
 from app.core.event_bus import ProductionEventBus
-from app.schemas import call_record
-from app.schemas.call_record import CallRecord, CurrentCallInfo, DialogEntry
+from app.models.call_record import CallRecord, DialogEntry, DialogRecord
 
 # 使用主应用的logger
 from app.core.logger import get_logger
-from app.schemas.device_info import DeviceInfo
+from app.models.device_info import ConfigAudioDeviceInfo, DeviceInfo
 from app.services.base_service import BaseService
 
 logger = get_logger(__name__)
@@ -23,8 +23,9 @@ class RedisService(BaseService):
     # Redis 键名常量
     DEVICE_INFO_KEY = "device_info"
     CALL_RECORD_PREFIX = "call_record:"
-    CURRENT_CALL_INFO_PREFIX = "current_call_info:"
     LOCK_PREFIX = "lock:"
+    CONFIG_INPUT_AUDIO_KEY = "config_input_audio"
+    DIALOG_RECORD_PREFIX = "dialog_record:"
     
     def __init__(self, event_bus: Optional[ProductionEventBus] = None):
         """初始化 Redis 服务（支持事件总线注入）"""
@@ -47,16 +48,25 @@ class RedisService(BaseService):
         try:
             # 创建连接池
             self._connection_pool = redis.ConnectionPool(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                password=settings.redis_password,
-                db=settings.redis_db,
-                decode_responses=True,
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
-                health_check_interval=30,
-            )
+            host=settings.redis_host,
+            port=settings.redis_port,           
+            username=settings.redis_username,
+            password=settings.redis_password,
+            db=settings.redis_db,
+            
+            connection_class=redis.SSLConnection,
+            
+            # 连接配置
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30,
+            
+            # 连接池配置
+            max_connections=20,                          # 添加最大连接数
+            retry_on_error=[redis.ConnectionError],      # 添加重试错误类型
+        )
             
             # 创建 Redis 客户端
             self.redis_client = redis.Redis(connection_pool=self._connection_pool)
@@ -176,6 +186,66 @@ class RedisService(BaseService):
                     logger.error(f"❌ Failed to release lock {lock_key}: {e}")
                 except Exception as e:
                     logger.error(f"❌ Unexpected error releasing lock {lock_key}: {e}")
+    
+    @asynccontextmanager
+    async def _acquire_multiple_locks(self, resource_ids: List[str], timeout: Optional[int] = None):
+        """
+        获取多个Redis分布式锁的异步上下文管理器 
+        
+        Args:
+            resource_ids: 资源ID列表
+            timeout: 锁超时时间
+        """
+        # 对资源ID排序，避免死锁 
+        sorted_resource_ids = sorted(resource_ids)
+        acquired_locks = []
+        
+        try:
+            # 按顺序获取所有锁
+            for resource_id in sorted_resource_ids:
+                lock_key = f"{self.LOCK_PREFIX}{resource_id}"
+                lock_timeout = timeout or self.lock_timeout
+                
+                lock = self.redis_client.lock(
+                    lock_key,
+                    timeout=lock_timeout,
+                    blocking_timeout=self.blocking_timeout,
+                    thread_local=False
+                )
+                
+                # 在线程池中获取锁
+                loop = asyncio.get_event_loop()
+                acquired = await loop.run_in_executor(None, lambda: lock.acquire(blocking=True))
+                
+                if not acquired:
+                    raise TimeoutError(f"Failed to acquire lock: {lock_key}")
+                    
+                acquired_locks.append(lock)
+                logger.debug(f"🔒 Multi-lock acquired: {lock_key}")
+            
+            yield acquired_locks
+            
+        except Exception as e:
+            logger.error(f"❌ Error acquiring multiple locks: {e}")
+            # 释放已获取的锁
+            for lock in acquired_locks:
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lock.release)
+                except Exception as release_error:
+                    logger.error(f"❌ Failed to release lock during cleanup: {release_error}")
+            raise
+        finally:
+            # 释放所有锁
+            for lock in acquired_locks:
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lock.release)
+                    logger.debug(f"🔓 Multi-lock released")
+                except (LockError, LockNotOwnedError) as e:
+                    logger.error(f"❌ Failed to release multi-lock: {e}")
+                except Exception as e:
+                    logger.error(f"❌ Unexpected error releasing multi-lock: {e}")
 
     # ==================== 设备信息管理 ====================
     
@@ -201,121 +271,6 @@ class RedisService(BaseService):
         except Exception as e:
             logger.error(f"Failed to save device info: {e}")
             return False
-    
-    async def get_device_info(self) -> Optional[DeviceInfo]:
-        """
-        获取设备信息
-        
-        Returns:
-            DeviceInfo: 设备信息对象，不存在时返回 None
-        """
-        self._ensure_connected()
-        try:
-            data = self.redis_client.get(self.DEVICE_INFO_KEY)
-            if not data:
-                logger.warning("Device info not found")
-                return None
-            
-            device_info = DeviceInfo.model_validate_json(data)
-            self.device_info = device_info
-            logger.info(f"Device info retrieved: devid={device_info.devid}")
-            return device_info
-        except Exception as e:
-            logger.error(f"Failed to get device info: {e}")
-            return None
-    
-    async def get_default_device_instance(self, device_index: int|None = None) -> Optional[int]:
-        """
-        获取默认设备的 instance 值
-        
-        Args:
-            device_index: 设备索引，默认为 0（第一个设备）
-            
-        Returns:
-            int: 设备的 instance 值，不存在时返回 None
-        """
-        if device_index is None:
-            device_index = 0
-        
-        self._ensure_connected()
-        try:
-            if self.device_info:
-                logger.info(f"Default device instance retrieved: {self.device_info.devices[device_index].instance}")
-                return self.device_info.devices[device_index].instance
-            
-            device_info = await self.get_device_info()
-            if not device_info or not device_info.devices:
-                logger.warning("Device info not found or device list is empty")
-                return None
-            
-            if device_index >= len(device_info.devices):
-                logger.warning(f"Device index {device_index} out of range, total devices: {len(device_info.devices)}")
-                return None
-            
-            instance = device_info.devices[device_index].instance
-            self.device_info = device_info
-            logger.info(f"Default device instance retrieved: {instance}")
-            return instance
-        except Exception as e:
-            logger.error(f"Failed to get default device instance: {e}")
-            return None
-    
-    async def device_exists(self) -> bool:
-        """
-        检查设备信息是否存在
-        
-        Returns:
-            bool: 设备信息是否存在
-        """
-        self._ensure_connected()
-        try:
-            return self.redis_client.exists(self.DEVICE_INFO_KEY) > 0
-        except Exception as e:
-            logger.error(f"Failed to check device info existence: {e}")
-            return False
-    
-    async def delete_device_info(self) -> bool:
-        """
-        删除设备信息 - 使用分布式锁
-        
-        Returns:
-            bool: 操作是否成功
-        """
-        self._ensure_connected()
-        try:
-            async with self.acquire_lock("device_info"):
-                result = self.redis_client.delete(self.DEVICE_INFO_KEY)
-                if result:
-                    logger.info("Device info deleted with lock")
-                    return True
-                else:
-                    logger.warning("Device info not found, no need to delete")
-                    return False
-        except Exception as e:
-            logger.error(f"Failed to delete device info: {e}")
-            return False
-    
-    async def get_device_count(self) -> int:
-        """
-        获取设备数量
-        
-        Returns:
-            int: 设备数量
-        """
-        device_info = await self.get_device_info()
-        return len(device_info.devices) if device_info else 0
-    
-    async def get_all_device_instances(self) -> List[int]:
-        """
-        获取所有设备的 instance 列表
-        
-        Returns:
-            List[int]: 所有设备的 instance 值列表
-        """
-        device_info = await self.get_device_info()
-        if not device_info:
-            return []
-        return [device.instance for device in device_info.devices]
 
     # ==================== 电话记录管理（使用分布式锁） ====================
     
@@ -350,7 +305,7 @@ class RedisService(BaseService):
             logger.error(f"Failed to create call record: {e}")
             raise
 
-    async def update_call_record(self, call_record: CallRecord = None) -> bool:
+    async def update_call_record(self, call_record: CallRecord) -> bool:
         """
         更新电话记录（使用 CallRecord 对象）- 使用分布式锁
         
@@ -417,62 +372,61 @@ class RedisService(BaseService):
             logger.error(f"Failed to update call record status: {e}")
             return False
     
-    async def update_call_record_call_id(self, instance: int, new_call_id: str) -> bool:
+    async def update_call_record_call_id(self, old_call_id: str, new_call_id: str) -> bool:
         """
-        更新电话记录call_id - 使用分布式锁
+        安全更新电话记录call_id - 使用分布式锁和原子操作
+        
+        Args:
+            old_call_id: 当前的call_id  
+            new_call_id: 新的call_id
+            
+        Returns:
+            bool: 操作是否成功
         """
         self._ensure_connected()
+        
         try:
-            current_call_info = await self.get_current_call_info(instance)
+            # 使用多个锁来确保原子性，按顺序获取避免死锁 
+            async with self._acquire_multiple_locks([f"call_record:{old_call_id}", f"call_record:{new_call_id}"]):
+                # 1. 获取原始通话记录
+                call_record = await self._get_call_record_without_lock(old_call_id)
+                if not call_record:
+                    logger.warning(f"Call record not found: {old_call_id}")
+                    return False
 
-            if not current_call_info:
-                logger.warning(f"Current call info not found: {instance}")
-                return False
-
-            call_record = await self.get_call_record(current_call_info.uuid_call_record)
-
-            if not call_record:
-                logger.warning(f"Call record not found: {current_call_info.uuid_call_id}")
-                return False
+                # 3. 使用Redis Pipeline确保原子性 
+                pipeline = self.redis_client.pipeline()
                 
-            call_record.call_id = new_call_id
-            call_record.updated_at = datetime.now()
-            self.redis_client.set(
-                f"{self.CALL_RECORD_PREFIX}{call_record.call_id}",
-                call_record.model_dump_json(),
-                ex=86400
-            )
-            self.redis_client.delete(f"{self.CALL_RECORD_PREFIX}{current_call_info.uuid_call_record}")
-            current_call_info.uuid_call_id = new_call_id
-            self.redis_client.set(
-                f"{self.CURRENT_CALL_INFO_PREFIX}{current_call_info.instance}",
-                current_call_info.model_dump_json(),
-                ex=3600
-            )
-            logger.info(f"Call record ID updated with lock: {instance} -> {new_call_id}")
-            return True
+                try:
+                    # 更新通话记录的call_id
+                    call_record.call_id = new_call_id
+                    call_record.updated_at = datetime.now()
+                    
+                    # 原子操作：创建新记录、删除旧记录
+                    pipeline.set(
+                        f"{self.CALL_RECORD_PREFIX}{new_call_id}",
+                        call_record.model_dump_json(),
+                        ex=86400  # 24小时过期
+                    )
+                    pipeline.delete(f"{self.CALL_RECORD_PREFIX}{old_call_id}")
+                    
+                    # 执行所有操作
+                    results = pipeline.execute()
+                    
+                    # 验证所有操作都成功
+                    if all(results):
+                        logger.info(f"Call record ID updated atomically: {old_call_id} -> {new_call_id}")
+                        return True
+                    else:
+                        logger.error(f"Pipeline execution failed: {results}")
+                        return False
+                        
+                except Exception as pipeline_error:
+                    logger.error(f"Pipeline execution error: {pipeline_error}")
+                    return False
 
         except Exception as e:
             logger.error(f"Failed to update call record ID: {e}")
-            return False
-    
-    async def update_call_record_dialog_record(self, call_id: str, dialog_entry: DialogEntry) -> bool:
-        """
-        更新电话记录对话记录 - 使用分布式锁
-        """
-        self._ensure_connected()
-        try:
-            async with self.acquire_lock(f"call_record:{call_id}"):
-                call_record = await self._get_call_record_without_lock(call_id)
-                if not call_record:
-                    logger.warning(f"Call record not found: {call_id}")
-                    return False
-                call_record.dialog_record.append(dialog_entry)
-                call_record.updated_at = datetime.now()
-                await self.update_call_record(call_record)
-                return True
-        except Exception as e:
-            logger.error(f"Failed to update call record dialog record: {e}")
             return False
 
     async def _get_call_record_without_lock(self, call_id: str) -> Optional[CallRecord]:
@@ -498,7 +452,7 @@ class RedisService(BaseService):
             logger.error(f"Failed to get call record without lock: {e}")
             return None
 
-    async def get_call_record(self, call_id: str) -> Optional[CallRecord]:
+    async def get_call_record(self, call_id: str, lock: bool = True) -> Optional[CallRecord]:
         """
         获取电话记录
         
@@ -507,6 +461,21 @@ class RedisService(BaseService):
             
         Returns:
             CallRecord: 电话记录对象，不存在时返回 None
+        """
+        self._ensure_connected()
+        try:
+            if lock:
+                async with self.acquire_lock(f"{self.CALL_RECORD_PREFIX}{call_id}"):
+                    return await self._get_call_record_without_lock(call_id)
+            else:
+                return await self._get_call_record_without_lock(call_id)
+        except Exception as e:
+            logger.error(f"Failed to get call record: {e}")
+            return None
+    
+    async def _get_call_record_without_lock(self, call_id: str) -> Optional[CallRecord]:
+        """
+        内部方法：获取电话记录（不使用锁，避免递归锁）
         """
         self._ensure_connected()
         try:
@@ -543,25 +512,121 @@ class RedisService(BaseService):
             logger.error(f"Failed to get all call records: {e}")
             return []
     
+    # ==================== 对话记录管理 ====================
+
+    async def create_dialog_record(self, dialog_record: DialogRecord) -> bool:
+        """
+        创建对话记录 - 使用分布式锁
+        """
+        self._ensure_connected()
+        try:
+            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{dialog_record.call_id}"):
+                self.redis_client.set(
+                    f"{self.DIALOG_RECORD_PREFIX}{dialog_record.call_id}",
+                    dialog_record.model_dump_json(),
+                    ex=86400
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Failed to create dialog record: {e}")
+            return False
+
+    async def get_dialog_record(self, call_id: str, lock: bool = True) -> Optional[DialogRecord]:
+        """
+        获取对话记录
+        """
+        self._ensure_connected()
+        try:
+            if lock:
+                async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
+                    return await self._get_dialog_record_without_lock(call_id)
+            else:
+                return await self._get_dialog_record_without_lock(call_id)
+        except Exception as e:
+            logger.error(f"Failed to get dialog record: {e}")
+            return None
+    
+    async def _get_dialog_record_without_lock(self, call_id: str) -> Optional[DialogRecord]:
+        """
+        内部方法：获取对话记录（不使用锁，避免递归锁）
+        """
+        self._ensure_connected()
+        try:
+            key = f"{self.DIALOG_RECORD_PREFIX}{call_id}"
+            data = self.redis_client.get(key)
+            if not data:
+                logger.warning(f"Dialog record not found: {call_id}")
+                return None
+            dialog_record = DialogRecord.model_validate_json(data)
+            return dialog_record
+        except Exception as e:
+            logger.error(f"Failed to get dialog record: {e}")
+            return None
+            
+    async def update_call_record_dialog_record(self, call_id: str, dialog_entry: DialogEntry) -> bool:
+        """
+        更新电话记录对话记录 - 使用分布式锁
+        """
+        self._ensure_connected()
+        try:
+            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
+                dialog_record = await self._get_dialog_record_without_lock(call_id)
+                if not dialog_record:
+                    logger.warning(f"Call record not found: {call_id}")
+                    return False
+                dialog_record.dialog_record.append(dialog_entry)
+                await self.update_dialog_record(dialog_record)
+                self.redis_client.set(
+                    f"{self.DIALOG_RECORD_PREFIX}{call_id}",
+                    dialog_record.model_dump_json(),
+                    ex=86400
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update call record dialog record: {e}")
+            return False
+    
+    async def add_dialog_record(self, call_id: str, dialog_entry: DialogEntry) -> bool:
+        """
+        添加对话记录 - 使用分布式锁
+        """
+        self._ensure_connected()
+        try:
+            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
+                dialog_record : Optional[DialogRecord] = await self._get_dialog_record_without_lock(call_id)
+                if not dialog_record:
+                    logger.warning(f"Dialog record not found: {call_id}")
+                    return False
+                dialog_record.dialog_record.append(dialog_entry)
+                self.redis_client.set(
+                    f"{self.DIALOG_RECORD_PREFIX}{call_id}",
+                    dialog_record.model_dump_json(),
+                    ex=86400
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Failed to add dialog record: {e}")
+            return False
+    
     async def get_dialog_after_marking(self, call_id: str) -> str:
         """
         获取标记后的对话记录并更新标记 - 使用分布式锁
         """
         self._ensure_connected()
         try:
-            async with self.acquire_lock(f"call_record:{call_id}"):
+            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
                 # 从Redis获取对话记录
-                call_record = await self._get_call_record_without_lock(call_id)
+                dialog_record = await self._get_dialog_record_without_lock(call_id)
                 
-                if not call_record or not call_record.dialog_record:
+                if not dialog_record or not dialog_record.dialog_record:
                     return "客户没有说话"
                 
                 # 如果对话记录为空，返回"客户没有说话"
-                if not len(call_record.dialog_record) > call_record.dialog_record_reply_marking:
+                if not len(dialog_record.dialog_record) > dialog_record.dialog_record_reply_marking:
                     return "客户没有说话"
                 
                 # 获取标记位置之后的所有记录
-                new_records = call_record.dialog_record[call_record.dialog_record_reply_marking:]
+                new_records = dialog_record.dialog_record[dialog_record.dialog_record_reply_marking:]
                 
                 # 组合对话记录为字符串
                 dialog_text = ""
@@ -569,13 +634,12 @@ class RedisService(BaseService):
                     dialog_text += entry.content
                 
                 # 更新回复标记为下一个位置
-                call_record.dialog_record_reply_marking = call_record.dialog_record_reply_marking + len(new_records)
-                call_record.updated_at = datetime.now()
+                dialog_record.dialog_record_reply_marking = dialog_record.dialog_record_reply_marking + len(new_records)
                 
                 # 保存更新后的记录到 Redis
-                self.redis_client.set(
-                    call_record.call_id,
-                    call_record.model_dump_json(),
+                self.redis_client.set(      
+                    f"{self.DIALOG_RECORD_PREFIX}{call_id}",    
+                    dialog_record.model_dump_json(),
                     ex=86400
                 )
                 
@@ -585,102 +649,49 @@ class RedisService(BaseService):
             logger.error(f"Failed to get dialog after marking: {e}")
             return "客户没有说话"
     
-    # ==================== 当前拨打电话信息管理（使用分布式锁） ====================
-    
-    async def set_current_call_info(self, current_call_info: CurrentCallInfo) -> Optional[CurrentCallInfo]:
-        """
-        设置当前拨打电话信息（创建新的通话信息）- 使用分布式锁
-        
-        Args:
-            current_call_info: 当前拨打电话信息对象
-            
-        Returns:
-            CurrentCallInfo: 创建的通话信息对象，失败时返回 None
-        """
-        self._ensure_connected()
-        try:
-            if not current_call_info.instance:
-                logger.error("CurrentCallInfo object missing instance")
-                return None
 
-            async with self.acquire_lock(f"current_call_info:{current_call_info.instance}"):
-                # 保存到 Redis
-                self.redis_client.set(
-                    f"{self.CURRENT_CALL_INFO_PREFIX}{current_call_info.instance}",
-                    current_call_info.model_dump_json(),
-                    ex=3600  # 1小时过期，防止数据残留
-                )
-                
-                logger.info(f"Current call info set with lock: phone={current_call_info.phone}, instance={current_call_info.instance}")
-                return current_call_info
-        except Exception as e:
-            logger.error(f"Failed to set current call info: {e}")
-            return None
-    
-    async def get_current_call_info(self, instance: int) -> Optional[CurrentCallInfo]:
+    async def set_device_info_input_audio_and_output_audio(self, config_audio_device_info: ConfigAudioDeviceInfo) -> bool:
         """
-        获取当前拨打电话信息
-        
-        Returns:
-            CurrentCallInfo: 当前拨打电话信息对象，不存在时返回 None
+        设置设备信息输入音频和输出音频
         """
         self._ensure_connected()
         try:
-            key = f"{self.CURRENT_CALL_INFO_PREFIX}{instance}"
-            data = self.redis_client.get(key)
-            if not data:
-                logger.info("No current call info found")
-                return None
-            
-            current_call_info = CurrentCallInfo.model_validate_json(data)
-            logger.info(f"Current call info retrieved: uuid={current_call_info.uuid_call_id}, phone={current_call_info.phone}, instance={current_call_info.instance}")
-            return current_call_info
-        except Exception as e:
-            logger.error(f"Failed to get current call info: {e}")
-            return None
-    
-    async def update_current_call_info(self, current_call_info: CurrentCallInfo) -> bool:
-        """
-        更新当前拨打电话信息 - 使用分布式锁
-        
-        Args:
-            current_call_info: 要更新的通话信息对象
-            
-        Returns:
-            bool: 操作是否成功
-        """
-        self._ensure_connected()
-        try:
-            async with self.acquire_lock(f"current_call_info:{current_call_info.instance}"):
-                self.redis_client.set(
-                    f"{self.CURRENT_CALL_INFO_PREFIX}{current_call_info.instance}", 
-                    current_call_info.model_dump_json(),
-                    ex=3600  # 1小时过期，防止数据残留
-                )
+            async with self.acquire_lock(f"config_audio_device_info:{config_audio_device_info.id}"):
+
+                device_info = await self.get_device_info()
+                if not self.device_info:
+                    logger.error("Device info not found")
+                    raise ValueError("Device info not found")
                 
-                logger.info(f"Current call info updated with lock: instance={current_call_info.instance}")
+                input_devices, output_devices = get_audio_devices(deduplicate=True)
+
+                for device in device_info.devices:
+
+                    if config_audio_device_info.config_audio_device_info_mapping.device.instance == device.instance:
+                        config_audio_device_info.config_audio_device_info_mapping.device = device
+
+                    elif device.deviceId == config_audio_device_info.config_audio_device_info_mapping.device.deviceId:
+                        config_audio_device_info.config_audio_device_info_mapping.device = device
+
+                    for input_device in input_devices:
+                        if input_device.index == config_audio_device_info.config_audio_device_info_mapping.input_audio.index:
+                            config_audio_device_info.config_audio_device_info_mapping.input_audio = input_device
+                        elif input_device.name == config_audio_device_info.config_audio_device_info_mapping.input_audio.name:
+                            config_audio_device_info.config_audio_device_info_mapping.input_audio = input_device
+
+                    for output_device in output_devices:
+                        if output_device.index == config_audio_device_info.config_audio_device_info_mapping.output_audio.index:
+                            config_audio_device_info.config_audio_device_info_mapping.output_audio = output_device
+                        elif output_device.name == config_audio_device_info.config_audio_device_info_mapping.output_audio.name:
+                            config_audio_device_info.config_audio_device_info_mapping.output_audio = output_device
+
+                self.redis_client.set(
+                    f"{self.CONFIG_INPUT_AUDIO_KEY}",
+                    config_audio_device_info.model_dump_json(),
+                    ex=None  # 不过期
+                )
+                logger.info(f"Config audio device info saved with lock: {config_audio_device_info.id}")
                 return True
         except Exception as e:
-            logger.error(f"Failed to update current call info: {e}")
-            return False
-    
-    async def clear_current_call_info(self, instance: int) -> bool:
-        """
-        清除当前拨打电话信息 - 使用分布式锁
-        
-        Returns:
-            bool: 操作是否成功
-        """
-        self._ensure_connected()
-        try:
-            async with self.acquire_lock(f"current_call_info:{instance}"):
-                result = self.redis_client.delete(f"{self.CURRENT_CALL_INFO_PREFIX}{instance}")
-                if result:
-                    logger.info("Current call info cleared with lock")
-                    return True
-                else:
-                    logger.info("No current call info to clear")
-                    return True  # 没有数据也算成功
-        except Exception as e:
-            logger.error(f"Failed to clear current call info: {e}")
+            logger.error(f"Failed to save config audio device info: {e}")
             return False

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="AI Tele", description="Application name")
     debug: bool = Field(default=False, description="Debug mode")
     log_level: str = Field(default="INFO", description="Log level")
+    computer_config_id: str = Field(default="", description="Computer config ID")
     
     # Database
     database_url: str = Field(default="sqlite:///./ai_tele.db", description="Database connection URL")
@@ -64,6 +65,7 @@ class Settings(BaseSettings):
     redis_host: str = Field(default="localhost", description="Redis host")
     redis_port: int = Field(default=6379, description="Redis port")
     redis_db: int = Field(default=0, description="Redis database")
+    redis_username: Optional[str] = Field(default="default", description="Redis username")
     redis_password: Optional[str] = Field(default=None, description="Redis password")
     redis_ssl: bool = Field(default=False, description="Redis SSL")
     redis_decode_responses: bool = Field(default=True, description="Redis decode responses")

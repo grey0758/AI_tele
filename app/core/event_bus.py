@@ -135,7 +135,7 @@ class ProductionEventBus:
         
         self.listeners[listener.event_type].append(listener)
         # 按优先级排序（高优先级在前）
-        self.listeners[listener.event_type].sort(key=lambda x: x.priority, reverse=True)
+        self.listeners[listener.event_type].sort(key=lambda x: x.priority.value, reverse=True)
         
         logger.info(
             f"Listener registered | event_type={listener.event_type.value}, "

@@ -1,8 +1,8 @@
 # app/services/rtasr_service.py
+import asyncio
 import hashlib
 import hmac
 import base64
-from datetime import datetime
 import json, time, threading
 from websocket import create_connection
 import websocket
@@ -11,8 +11,8 @@ import pyaudio
 from typing import Dict, Any, Optional
 from app.core.config import settings
 from app.core.event_bus import ProductionEventBus
-from app.models.events import Event, EventListener, EventType
-from app.schemas.call_record import DialogEntry
+from app.models.events import Event, EventListener, EventPriority, EventType
+from app.models.call_record import DialogEntry
 from datetime import datetime
 from app.services.base_service import BaseService
 from app.services.redis_service import RedisService
@@ -56,12 +56,13 @@ class RtasrService(BaseService):
         if not self.event_bus:
             return
         
-        await self._register_listener(EventType.RTASR_START, self.handle_rtasr_start, 1, wait_for_result=False)
-        await self._register_listener(EventType.RTASR_STOP, self.close, 1, wait_for_result=False)
-        await self._register_listener(EventType.RTASR_START_AUDIO, self.start_audio, 1, wait_for_result=False)
-        await self._register_listener(EventType.RTASR_STOP_AUDIO, self.stop_audio, 1, wait_for_result=False)
+        await self._register_listener(EventType.RTASR_START, self.handle_rtasr_start, wait_for_result=False)
+        await self._register_listener(EventType.RTASR_STOP, self.close, wait_for_result=False)
+        await self._register_listener(EventType.RTASR_START_AUDIO, self.start_audio, wait_for_result=False)
+        await self._register_listener(EventType.RTASR_STOP_AUDIO, self.stop_audio, wait_for_result=False)
+        await self._register_listener(EventType.RTASR_CALL_FINISHED, self.reset_to_initialized_state, wait_for_result=False)
 
-    async def _register_listener(self, event_type, handler, priority, **kwargs):
+    async def _register_listener(self, event_type, handler, priority=EventPriority.NORMAL, **kwargs):
         """辅助方法：减少重复代码"""
         try:
             self.event_bus.register_listener(
@@ -115,7 +116,7 @@ class RtasrService(BaseService):
             logger.error(f"RTASR连接创建失败: {e}")
             return False
 
-    def handle_rtasr_message(self, call_id: str, message_data: Dict):
+    def handle_rtasr_message(self, message_data: Dict):
         try:
             action = message_data.get("action")
             logger.debug(f"处理 RTASR 消息:{action}")
@@ -151,9 +152,16 @@ class RtasrService(BaseService):
                         timestamp= datetime.now().isoformat()
                     )
 
-                    self.redis_service.update_call_record_dialog_record(self.call_id, dialog_entry_data)
-
-                    self.process_rtasr_text(dialog_entry_data, msg_type)
+                def save_dialog_async():
+                    try:
+                        asyncio.run(
+                            self.redis_service.add_dialog_record(self.call_id, dialog_entry_data)
+                        )
+                    except Exception as e:
+                        logger.error(f"保存对话记录失败: {e}")
+                
+                # 启动后台线程，不等待完成
+                threading.Thread(target=save_dialog_async, daemon=True).start()
                 
                 return {"status": "success", "action": "result", "text": text, "type": msg_type}
                 
@@ -176,21 +184,6 @@ class RtasrService(BaseService):
             logger.error(f"处理 RTASR 消息错误: {e}")
             raise
 
-    def process_rtasr_text(self, dialog_entry_data: DialogEntry, msg_type: str):
-        try:
-            # 这里可以实现文本处理逻辑
-            # 比如：语义分析、意图识别、触发AI回复等
-            
-            # 如果是完整句子，可以触发AI处理
-            if msg_type == "0":  # 中间结果
-                # 可以触发实时处理
-                pass
-            
-            return {"status": "processed", "text": dialog_entry_data.content}
-        except Exception as e:
-            logger.error(f"处理识别文本错误: {e}")
-            raise
-
     def _recv_loop(self):
         """接收消息循环"""
         try:
@@ -206,7 +199,7 @@ class RtasrService(BaseService):
                         logger.error("RTASR接收消息失败: call_id为空")
                         continue
                     
-                    self.handle_rtasr_message(self.call_id, result_dict)
+                    self.handle_rtasr_message(result_dict)
                         
                 except websocket.WebSocketTimeoutException:
                     continue
@@ -288,3 +281,72 @@ class RtasrService(BaseService):
             "is_sending_audio": self.is_sending_audio,
             "timestamp": datetime.now().isoformat()
         }
+
+    def reset_to_initialized_state(self, event):
+        """将RTASR服务重置到initialize完成后的状态"""
+        logger.info("开始重置RTASR服务到initialize后状态...")
+        
+        try:
+            # 1. 停止当前所有活动
+            self.ws_connected = False
+            self.is_sending_audio = False
+            
+            # 2. 关闭WebSocket连接
+            if self.ws:
+                try:
+                    # 发送结束标记
+                    if self.ws.connected:
+                        end_tag = "{\"end\": true}"
+                        self.ws.send(bytes(end_tag.encode('utf-8')))
+                    self.ws.close()
+                except Exception as e:
+                    logger.warning(f"关闭RTASR WebSocket时出错: {e}")
+                finally:
+                    self.ws = None
+            
+            # 3. 等待接收线程结束
+            if self.trecv and self.trecv.is_alive():
+                self.trecv.join(timeout=3.0)
+                if self.trecv.is_alive():
+                    logger.warning("RTASR接收线程未能及时退出")
+            
+            # 4. 等待音频线程结束
+            if self.audio_thread and self.audio_thread.is_alive():
+                self.audio_thread.join(timeout=3.0)
+                if self.audio_thread.is_alive():
+                    logger.warning("RTASR音频线程未能及时退出")
+            
+            # 5. 重置所有属性到 initialize 后的状态
+            self._reset_attributes_to_initialized()
+            
+            logger.info("RTASR服务已成功重置到initialize后状态")
+            return True
+            
+        except Exception as e:
+            logger.error(f"重置RTASR服务失败: {e}")
+            return False
+
+    def _reset_attributes_to_initialized(self):
+        """重置所有属性到initialize完成后的状态"""
+        
+        # BaseService相关属性保持不变
+        # self.event_bus, self.service_name 由父类管理，不重置
+        
+        # 构造函数参数保持不变
+        # self.redis_service, self.event_bus, self.app_id, self.api_key 不重置
+        
+        # 重置会话相关状态
+        self._is_ready = False  # 重置为初始化后的状态
+        self.call_id = None
+        
+        # 重置连接状态
+        self.ws = None
+        self.ws_connected = False
+        self.is_sending_audio = False
+        
+        # 重置线程引用
+        self.trecv = None
+        self.audio_thread = None
+        
+        # silence_data 保持不变，这是常量数据
+        # self.silence_data = b'\x00' * 1280  # 保持不变

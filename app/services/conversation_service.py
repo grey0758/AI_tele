@@ -1,8 +1,15 @@
+from typing import Annotated
+from pydantic import BaseModel, Field
 import requests
 
 from app.core.config import settings
 from app.core.logger import get_logger
 logger = get_logger(__name__)
+
+class ConversationAnswer(BaseModel):
+    isCallEnd: Annotated[bool, Field(description="是否结束通话")]
+    answer: Annotated[str, Field(description="回答")]
+    
 
 class ConversationService:
     def __init__(self):
@@ -28,6 +35,8 @@ class ConversationService:
 表达简洁清晰，不冗长，不制造沟通压力。
 
 回答要有同理心，尊重客户的语气与态度。
+
+根据客户的语言风格和情绪状态，个性化调整回复方式。
 
 所有结束语必须包含"再见"。
 
@@ -69,7 +78,7 @@ A：广东省广州市天河区临江大道天德广场T1栋14楼1403。您这�
 
 客户提问 FAQ → 按 FAQ 答复后必须再次询问需求。
 
-[RELIES]
+[参考句子]
 
 REJECT_END（提供给无意向用户）：
 
@@ -98,6 +107,14 @@ SECOND_PROBE（首次回答含糊）：
 任何复杂产品/技术/价格问题：回应"这部分需要同事结合您的具体需求再详细介绍，我先确认您是否需要同事联系？"
 
 未识别文本或听不清：我再重复一下：我们是广州大麦，自研了一款帮老板做生意的AI智能眼镜，您感兴趣吗？
+
+[个性化回复要求]
+
+- 根据客户的语言风格（正式/随意）调整用词
+- 根据客户的情绪状态（急躁/平和/友好）调整语气
+- 根据客户的表达习惯（简洁/详细）调整回复长度
+- 保持语言尊重，避免任何可能冒犯的表达
+- 确保表达清晰，避免歧义和模糊表述
 
 [DO NOT DO]
 
@@ -131,13 +148,20 @@ SECOND_PROBE 后仍模糊 → INTEREST_END
 
 所有结束输出必须含"再见"
 
-
-
 [OUTPUT FORMAT]
 
-只输出最终要对客户说的一段自然话术。不输出内部标签。
+必须严格按照以下JSON格式输出，不得有任何其他内容：
 
-准备就绪后，基于来电过程客户实时语句做出最合适一句回复。
+{
+    "isCallEnd": true/false,
+    "answer": "具体回复内容"
+}
+
+其中：
+- isCallEnd: 当使用任何END结束语时为true，其他情况为false
+- answer: 根据客户内容个性化生成的回复，语言尊重，表达清晰
+
+准备就绪后，基于来电过程客户实时语句做出最合适的JSON格式回复。
 """
         self.model = "gpt-4.1"
         self.max_tokens = 5000
@@ -149,31 +173,57 @@ SECOND_PROBE 后仍模糊 → INTEREST_END
             'Content-Type': 'application/json'
         }
 
-    def ai_decision(self, chat_log):
+    def ai_decision(self, chat_log) -> ConversationAnswer:
         logger.info(f"用户对话记录: {chat_log}")
+        full_content = f"{self.prompt}\n\n[当前对话记录]\n{chat_log}\n\n请根据以上规则和对话记录，给出合适的回复："
+        
         payload = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": [{
                 "role": "user",
-                "content": self.prompt.replace("{{chat_log}}", str(chat_log))
+                "content": full_content
             }],
             "temperature": 0
         }
-        response_data = requests.post(self.url, headers=self.headers, json=payload).json()
-        # print(response_data)
-        choices = response_data.get('choices')
-        content = None
-        if choices and isinstance(choices, list) and len(choices) > 0:
-            first_choice = choices[0]
-            message = first_choice.get('message')
-            if message:
-                content = message.get('content')
-        if content and ord(content[0]) == 32:
-            content = content[1:]
-        if content and content[:2] == '\n\n':
-            content = content[2:]
-        return content
+        
+        try:
+            response_data = requests.post(self.url, headers=self.headers, json=payload).json()
+            choices = response_data.get('choices')
+            content = None
+            
+            if choices and isinstance(choices, list) and len(choices) > 0:
+                first_choice = choices[0]
+                message = first_choice.get('message')
+                if message:
+                    content = message.get('content')
+            
+            logger.info(f"AI返回内容: {content}")
+            
+            if content:
+                # 使用 model_validate_json 来解析 JSON 字符串
+                logger.info(f"ConversationAnswer: content: {content}")
+                return ConversationAnswer.model_validate_json(content)
+            else:
+                # 如果没有内容，返回默认值
+                logger.warning("AI返回内容为空，使用默认回复")
+                return ConversationAnswer(
+                    isCallEnd=False,
+                    answer="抱歉，系统出现问题，请稍后再试。"
+                )
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API请求错误: {e}")
+            return ConversationAnswer(
+                isCallEnd=False,
+                answer="网络连接出现问题，请稍后再试。"
+            )
+        except Exception as e:
+            logger.error(f"AI决策处理错误: {e}")
+            return ConversationAnswer(
+                isCallEnd=False,
+                answer="系统处理出现问题，请稍后再试。"
+            )
 
 
 # 创建全局实例

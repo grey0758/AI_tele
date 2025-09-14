@@ -1,10 +1,8 @@
 # app/services/phone_service.py
 import asyncio
 from datetime import datetime
-from enum import Enum
 import json
-from re import S
-from app.models.events import Event
+from app.models.events import Event, EventPriority
 
 from pydantic import BaseModel, Field
 from app.models.events import EventListener, EventType
@@ -13,8 +11,8 @@ from typing import Annotated, Dict, Any, Optional
 from websockets import connect
 from websockets.exceptions import ConnectionClosed
 from app.core.event_bus import ProductionEventBus
-from app.schemas.call_record import CallRecord
-from app.schemas.device_info import Device
+from app.models.call_record import CallRecord, DialogEntry, DialogRecord
+from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
 
@@ -32,7 +30,7 @@ logger = get_logger(__name__)
 class SendMessage(BaseModel):
     method: Annotated[str, Field(description="方法")]
     instance: Annotated[int, Field(description="设备实例")]
-    phone: Annotated[str, Field(description="电话号码")]
+    phone: Annotated[str | None, Field(default=None, description="电话号码")]
     CustomId: Annotated[str | None, Field(default=None, description="自定义ID", exclude=True)]
 
 class OnMessageType(BaseModel):
@@ -50,9 +48,12 @@ class PhoneService(BaseService):
         self.websocket = None
         self.should_stop = False
         self._service_task = None
-        self.tts_opening = ""
         self._is_running = False
         self.redis_service = redis_service
+
+        self.call_id = None
+        self.instance = None
+        self.call_finished = False  
     
     async def initialize(self):
         try:
@@ -70,9 +71,10 @@ class PhoneService(BaseService):
         if not self.event_bus:
             return
         
-        await self._register_listener(EventType.CALL_OUT, self.handle_call_out, 1, wait_for_result=False)
+        await self._register_listener(EventType.CALL_OUT, self.handle_call_out, wait_for_result=False)
+        await self._register_listener(EventType.CALL_END, self.hang_up, wait_for_result=False)
         
-    async def _register_listener(self, event_type, handler, priority, **kwargs):
+    async def _register_listener(self, event_type, handler, priority=EventPriority.NORMAL, **kwargs):
         """辅助方法：减少重复代码"""
         try:
             self.event_bus.register_listener(
@@ -196,6 +198,7 @@ class PhoneService(BaseService):
         try:
             # 从事件中提取数据
             call_record: CallRecord = event.data
+            self.call_id = call_record.call_id
 
             # 构建拨号消息
             dial_message = SendMessage(
@@ -247,27 +250,29 @@ class PhoneService(BaseService):
                 "message": f"拨号异常: {str(e)}"
             }
     
-    async def hang_up(self, instance: int = 0) -> Dict[str, Any]:
+    async def hang_up(self, event: Event = None) -> Dict[str, Any]:
         """
         挂断电话
         
         Args:
-            instance: 设备实例值
+            event: 事件
             
         Returns:
             Dict: 挂断结果
         """
         try:
-            hang_up_message = {
-                "method": "hangup",
-                "instance": instance
-            }
+            instance = self.instance
+
+            hang_up_message = SendMessage(
+                method="terminateCall",
+                instance=instance,
+            )
             
             logger.info(f"Hanging up call on instance {instance}")
             
-            success = await self.send_message(hang_up_message)
+            await self.send_message(hang_up_message)
             
-            if success:
+            if True:
                 return {
                     "success": True,
                     "instance": instance,
@@ -347,15 +352,36 @@ class PhoneService(BaseService):
                             instance=data.get("instance"),
                             uuid=data.get("uuid")
                         )
-                        await self.redis_service.update_call_record_call_id(instance=on_message.instance, new_call_id=on_message.uuid)
-                        await self.redis_service.update_call_record_status(call_id=on_message.uuid, status="已接听")
 
-                        record = await self.redis_service.get_call_record(on_message.uuid)
+                        await self.redis_service.update_call_record_call_id(self.call_id,on_message.uuid)
+
+                        self.call_id = on_message.uuid
+                        self.instance = on_message.instance
+
+                        await self.redis_service.update_call_record_status(call_id=self.call_id, status="已接听")
+
+                        record = await self.redis_service.get_call_record(self.call_id)
+
                         tts_opening = record.tts_opening if record else ""
-                        await self.emit_event(EventType.TTS_SEND_TEXT, tts_opening)
-                        await self.emit_event(EventType.RTASR_START, on_message.uuid, event_id=on_message.uuid)
+
+                        dialog_record = DialogRecord(
+                            call_id=self.call_id,
+                            dialog_record=[DialogEntry(speaker="agent", content=tts_opening, timestamp=datetime.now().isoformat())],
+                            dialog_record_reply_marking=0
+                        )
+
+                        await self.redis_service.create_dialog_record(dialog_record)
+
+                        tts_send_text = {
+                            "text": tts_opening,
+                            "call_id": self.call_id,
+                            "instance": self.instance
+                        }
+
+                        await self.emit_event(EventType.TTS_SEND_TEXT, tts_send_text)
+                        await self.emit_event(EventType.RTASR_START, self.call_id)
                         await asyncio.sleep(5)
-                        await self.emit_event(EventType.RTASR_START_AUDIO, on_message.uuid)
+                        await self.emit_event(EventType.RTASR_START_AUDIO, self.call_id)
 
                     elif notify_type == "OnCallOut":
                         # 处理呼出事件
@@ -367,7 +393,7 @@ class PhoneService(BaseService):
 
                     elif notify_type == "OnHangUp":
                         # 处理挂断事件
-                        pass
+                        await self._call_finished()
                         
                     else:
                         logger.debug(f"Unknown notify type: {notify_type}")
@@ -383,3 +409,10 @@ class PhoneService(BaseService):
             logger.error(f"Error in message listener: {e}")
         finally:
             logger.info("Message listener stopped")
+    
+    async def _call_finished(self):
+        """通话结束"""
+        self.call_finished = True
+        self.call_id = None
+        self.instance = None
+        await self.emit_event(EventType.CALL_END, None)

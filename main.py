@@ -79,6 +79,6 @@ if __name__ == "__main__":
         port=settings.port,
         reload=settings.debug,
         reload_dirs=["."],
-        reload_excludes=["logs/*", "*.log", "uploads/*", "**/__pycache__/*"],
+        reload_excludes=["logs/**/*", "*.log", "uploads/*", "**/__pycache__/*", "logs/"],
         log_level="info"
     )
