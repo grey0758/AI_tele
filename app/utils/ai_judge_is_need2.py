@@ -1,8 +1,10 @@
+"""AI判断是否需要深入了解AI眼镜"""
+# app/utils/ai_judge_is_need2.py
 import requests
 
 from app.core.config import settings
 
-prompt = """
+PROMPT = """
 
  **[TRANSCENDENT_ROLE]**
 
@@ -84,8 +86,8 @@ prompt = """
 
 
 
-model = "gpt-4.1"
-max_tokens = 5000
+MODEL = "gpt-4.1"
+MAX_TOKENS = 5000
 url = settings.openai_url
 key = settings.openai_api_key
 headers = {
@@ -96,16 +98,17 @@ headers = {
 
 
 def ai_decision(chat_log):
+    """AI判断是否需要深入了解AI眼镜"""
     payload = {
-        "model": model,
+        "model": MODEL,
         "max_tokens": 5000,
         "messages": [{
             "role": "user",
-            "content": prompt.replace("{{chat_log}}", str(chat_log))
+            "content": PROMPT.replace("{{chat_log}}", str(chat_log))
         }],
         "temperature": 0
     }
-    response_data = requests.post(url, headers=headers, json=payload).json()
+    response_data = requests.post(url, headers=headers, json=payload, timeout=30).json()
     # print(response_data)
     choices = response_data.get('choices')
     content = None
@@ -122,4 +125,5 @@ def ai_decision(chat_log):
 
 
 if __name__ == '__main__':
-    print(ai_decision("""广州大麦-月月: 面谈：陈婉雯，13509958485，40年家族企业，在佛山，做玻璃加工，想推广建筑玻璃，BToB，直播会议全程跟的，非常认可我们，最近在做升级，先谈一下看看，后面会来公司面谈 周五回复，我到时候联系她，高概率 随时沟通，解答了疑问，高概率 他们老板想继续过来下，晚点他给我具体时间确定""").replace("\n", " "))
+    print(ai_decision("""广州大麦-月月: 面谈：陈婉雯，13509958485，40年家族企业，在佛山，做玻璃加工，想推广建筑玻璃，BToB，直播会议全程跟的，非常认可我们，最近在做升级，先谈一下看看，后面会来公司面谈 周五回复，我到时候联系她，高概率 随时沟通，解答了疑问，高概率 他们老板想继续过来下，晚点他给我具体时间确定""").replace("\n", " ")) # pylint: disable=line-too-long
+    

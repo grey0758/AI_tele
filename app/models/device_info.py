@@ -1,6 +1,8 @@
+# app/models/device_info.py
+"""设备信息数据类"""
 import uuid
-from pydantic import BaseModel, Field
 from typing import Annotated, List
+from pydantic import BaseModel, Field
 
 class InputDevice(BaseModel):
     """输入设备信息数据类"""
@@ -43,7 +45,6 @@ class DeviceInfo(BaseModel):
     devid: Annotated[str | None, Field(default=None, description="设备ID")]
     version: Annotated[str | None, Field(default=None, description="版本号")]
     recordmode: Annotated[int | None, Field(default=None, description="录音模式")]
-    
     devices: Annotated[List[Device], Field(default_factory=list, description="设备列表")]
 
 
@@ -51,5 +52,3 @@ class ConfigAudioDeviceInfo(BaseModel):
     """配置音频设备信息数据类"""
     id: Annotated[str, Field(default_factory=lambda: str(uuid.uuid4()), description="UUID")]
     device: Annotated[List[Device], Field(default_factory=list, description="设备")]
-
-

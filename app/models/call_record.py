@@ -1,11 +1,13 @@
-from enum import Enum, IntEnum
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List, Annotated
-from datetime import datetime
+# app/models/call_record.py
+"""电话记录数据类"""
+from enum import IntEnum
 import uuid
-
+from typing import List, Annotated
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field
 
 class CallType(IntEnum):
+    """通话类型"""
     INCOMING = 1  # 呼入
     INCOMING_MISSED = 2  # 呼入未接
     OUTGOING = 3  # 呼出
@@ -63,7 +65,6 @@ class CallRecordInfo(CallRecord):
     area: Annotated[str | None, Field(default=None, description="地区")]
     file_size: Annotated[int | None, Field(default=None, description="文件大小")]
     file_url: Annotated[str | None, Field(default=None, description="文件URL")]
-    
     model_config = ConfigDict(use_enum_values=False)
 
 class CurrentCallInfo(BaseModel):
@@ -73,5 +74,3 @@ class CurrentCallInfo(BaseModel):
     phone: Annotated[str | None, Field(default=None, description="电话号码")]
     instance: Annotated[int, Field( description="设备实例ID")]
     device_index: Annotated[int, Field(description="设备索引")]
-
-

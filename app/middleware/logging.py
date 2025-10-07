@@ -8,7 +8,7 @@ async def logging_middleware(request: Request, call_next):
     start_time = time.time()
     
     # Log request
-    logger.info(f"Request: {request.method} {request.url}")
+    logger.info("Request: %s %s", request.method, request.url)
     
     # Process request
     response = await call_next(request)
@@ -17,6 +17,6 @@ async def logging_middleware(request: Request, call_next):
     process_time = time.time() - start_time
     
     # Log response
-    logger.info(f"Response: {response.status_code} - {process_time:.4f}s")
+    logger.info("Response: %s - %.4fs", response.status_code, process_time)
     
     return response

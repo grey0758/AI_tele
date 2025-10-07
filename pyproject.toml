@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-tele"
+version = "0.1.0"
+description = "AI Tele FastAPI Project"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # 核心框架
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy",
+    "alembic",
+    # 数据验证
+    "pydantic>=2.11.7,<3.0.0",
+    "pydantic-settings",
+    # Web相关
+    "python-multipart",
+    # 数据库
+    "mysqlclient>=2.2.0",
+    # 配置和环境
+    "python-dotenv",
+    # 远程连接
+    "asyncssh",
+    "websocket-client",
+    # 缓存
+    "redis",
+    # 定时任务调度
+    "apscheduler>=3.10.0",
+    # HTTP客户端
+    "requests",
+    "aiohttp",
+    # 日志美化
+    "rich",
+    # 文件处理
+    "aiofiles",
+]
+
+[project.optional-dependencies]
+dev = [
+    # 构建工具
+    "setuptools>=61.0",
+    "wheel",
+    # 开发工具
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+    # 类型检查
+    "mypy>=1.18.2",
+    "types-aiofiles>=24.1.0.20250822",
+]
+audio = [
+    "pyaudio>=0.2.11",
+]
+cloud = [
+    "cos-python-sdk-v5>=1.9.38",
+]
+
+[tool.uv]
+link-mode = "copy"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*", "alembic*", "logs*", "uploads*"]
+
+[tool.black]
+line-length = 200
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 200
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--asyncio-mode=auto",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=html:htmlcov",
+    "--cov-fail-under=80",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "performance: marks tests as performance tests",
+]
+filterwarnings = [
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+]
+
+
+[tool.mypy]
+[[tool.mypy.overrides]]
+module = "apscheduler.*"
+ignore_missing_imports = true
+
+[tool.pylint]
+max-line-length = 200
