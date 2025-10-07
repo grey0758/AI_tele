@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 
 from app.core.event_bus import ProductionEventBus
-from app.models.events import EventType, EventPriority, Event
+from app.models.events import EventListener, EventType, EventPriority, Event
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -65,9 +65,22 @@ class BaseService(ABC):
             logger.error(f"Failed to emit event from {self.service_name} | event_type={event_type.value}, error={str(e)}")
             raise
     
-    async def register_event_listeners(self):
-        """注册事件监听器（子类实现）"""
-        pass
+    async def _register_listener(self, event_type, handler, priority=EventPriority.NORMAL, **kwargs):
+        """辅助方法：减少重复代码"""
+        try:
+            self.event_bus.register_listener(
+                EventListener(
+                    event_type=event_type,
+                    handler=handler, 
+                    priority=priority,
+                    name=f"{self.service_name}_{handler.__name__}",
+                    **kwargs
+                )
+            )
+            logger.info(f"✅ {self.service_name}: 注册监听器 {event_type.value}")
+        except Exception as e:
+            logger.error(f"❌ {self.service_name}: 注册监听器失败 {event_type.value} | error={str(e)}")
+            raise
     
     async def health_check(self) -> Dict[str, Any]:
         """健康检查（子类可重写）"""

@@ -12,26 +12,28 @@ from app.services.tts_service import TtsService
 from app.services.rtasr_service import RtasrService
 from app.services.aicall_service import AicallService
 from app.services.redis_service import RedisService
+from app.services.recoard_service import RecordService
+from app.services.conversation_service import ConversationService
 
 logger = get_logger(__name__)
 
 class EnhancedServiceContainer:
     """增强的服务容器 - 支持事件总线和生命周期管理"""
     
-    def __init__(self):
+    def __init__(self) :
         self._services = {}
         self._event_bus: Optional[ProductionEventBus] = None
         self._initialized = False
         self._lock = asyncio.Lock()
     
-    async def initialize(self, config=None):
+    async def initialize(self, config=None) -> bool: 
         """初始化所有服务"""
         if self._initialized:
-            return
+            return True
         
         async with self._lock:
             if self._initialized:  # 双重检查
-                return
+                return True
             
             try:
                 logger.info("Initializing service container...")
@@ -55,8 +57,8 @@ class EnhancedServiceContainer:
             except Exception as e:
                 logger.error("❌ Service container initialization failed | error=%s", str(e))
                 await self._cleanup()
-                raise
-    
+                return False
+        
     async def _initialize_services(self):
         """初始化业务服务"""
         # 创建服务实例并注入事件总线
@@ -65,6 +67,9 @@ class EnhancedServiceContainer:
         self._services['tts_service'] = TtsService(self._event_bus, self._services['redis_service'])
         self._services['rtasr_service'] = RtasrService(self._event_bus, self._services['redis_service'])
         self._services['aicall_service'] = AicallService(self._event_bus, self._services['redis_service'])
+        self._services['record_service'] = RecordService(self._event_bus, self._services['redis_service'])
+        self._services['conversation_service'] = ConversationService(self._event_bus)
+
         
         # 如果服务有异步初始化方法，调用它们
         for name, service in self._services.items():
@@ -248,7 +253,37 @@ def get_redis_service() -> RedisService:
             detail=str(e)
         )
 
-# === 批量获取服务 ===
+def get_record_service() -> RecordService:
+
+    try:
+        service = service_container.get_service('record_service')
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Record service not available"
+            )
+        return service
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e)
+        )
+
+def get_conversation_service() -> ConversationService:
+
+    try:
+        service = service_container.get_service('conversation_service')
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Conversation service not available"
+            )
+        return service
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e)
+        )
 
 def get_all_services() -> Dict[str, Any]:
     """获取所有服务"""

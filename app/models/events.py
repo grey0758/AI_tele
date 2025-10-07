@@ -33,16 +33,27 @@ class EventType(Enum):
     CALL_ANSWER = "call.answer"
     CALL_MISSED = "call.missed"
     CALL_BLOCKED = "call.blocked"
-    CALL_ON_ANSWER = "call.on_answer"
-    
+
+    AICALL_CALL_END = "aicall.call_end"
+    RECORD_CALL_END = "record.call_end"
+    TTS_CALL_END = "tts.call_end"
+
     TTS_SEND_TEXT = "tts.send_text"
-    TTS_CALL_FINISHED = "tts.call_finished"
+    TTS_CONNECT = "tts.connect"
 
     RTASR_START = "rtasr.start"
     RTASR_STOP = "rtasr.stop"
     RTASR_START_AUDIO = "rtasr.start_audio"
     RTASR_STOP_AUDIO = "rtasr.stop_audio"
-    RTASR_CALL_FINISHED = "rtasr.call_finished"
+    RTASR_CALL_END = "rtasr.call_end"
+
+    RECORD_UPLOAD_RECORD = "record.upload_record"
+
+    REDIS_ADD_DIALOG_RECORD = "redis.add_dialog_record"
+    REDIS_BIND_DIALOG_RECORD_TO_CALL_RECORD = "redis.bind_dialog_record_to_call_record"
+
+    CONVERSATION_ANSWER = "conversation.answer"
+
     # 自定义事件
     CUSTOM = "custom"
 

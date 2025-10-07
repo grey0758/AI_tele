@@ -1,10 +1,9 @@
-from typing import Annotated, List
+
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
 from app.utils.get_audio_devices import get_audio_devices
-from app.models.aicall import CallRequest
-from app.models.device_info import ConfigAudioDeviceInfo, InputDevice, OutputDevice
+from app.models.device_info import ConfigAudioDeviceInfo
 from app.core.dependencies import get_aicall_service, get_redis_service
+from app.schemas.aicall import CallResponse, CallRequest, DeviceConfigResponse, DeviceConfigListResponse
 from app.services.aicall_service import AicallService
 from app.services.redis_service import RedisService
 from app.core.logger import get_logger
@@ -12,26 +11,6 @@ from app.core.logger import get_logger
 
 router = APIRouter()
 logger = get_logger(__name__)
-
-class CallResponse(BaseModel):
-    success: Annotated[bool, Field(description="是否成功")]
-    message: Annotated[str | None, Field(default=None, description="消息")]
-    task_id: Annotated[str | None, Field(default=None, description="任务ID")]
-    phone_number: Annotated[str | None, Field(default=None, description="电话号码")]
-    error: Annotated[str | None, Field(default=None, description="错误")]
-
-class DeviceConfigResponse(BaseModel):
-    success: Annotated[bool, Field(description="是否成功")]
-    message: Annotated[str | None, Field(default=None, description="消息")]
-    config_id: Annotated[str | None, Field(default=None, description="配置ID")]
-    error: Annotated[str | None, Field(default=None, description="错误")]
-
-class DeviceConfigListResponse(BaseModel):
-    success: Annotated[bool, Field(description="是否成功")]
-    message: Annotated[str | None, Field(default=None, description="消息")]
-    error: Annotated[str | None, Field(default=None, exclude=True, description="错误")]
-    input_devices: Annotated[List[InputDevice], Field(default_factory=list, description="输入设备列表")]
-    output_devices: Annotated[List[OutputDevice], Field(default_factory=list, description="输出设备列表")]
 
 @router.post("/make_call", response_model=CallResponse)
 async def make_call(request: CallRequest, aicall_service: AicallService = Depends(get_aicall_service)):
@@ -41,35 +20,13 @@ async def make_call(request: CallRequest, aicall_service: AicallService = Depend
     Args:
         request: 包含电话号码和配置的请求
         
-    Returns:
+    Returns:    
         CallResponse: 呼叫结果
     """
-    try:
-        # 检查服务是否可用
-        if aicall_service.call_finished:
-            return CallResponse(
-                success=False,
-                message="系统繁忙，请稍后再试",
-                phone_number=request.phone_number,
-                error="Another call is already in progress"
-            )
-        
-        await aicall_service.make_call(request)
-        
-        return CallResponse(
-            success=True,
-            message="呼叫任务已提交",
-            phone_number=request.phone_number
-        )
-        
-    except Exception as e:
-        logger.error(f"make_call 接口异常: {e}", exc_info=True)
-        return CallResponse(
-            success=False,
-            message=f"发起呼叫失败: {str(e)}",
-            phone_number=request.phone_number,
-            error=str(e)
-        )
+    logger.info(f"make_call 接口请求: {request}")
+
+    return await aicall_service.make_call(request)
+
 
 @router.post("/set_device_config", response_model=DeviceConfigResponse)
 async def set_device_config(

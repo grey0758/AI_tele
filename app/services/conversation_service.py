@@ -1,19 +1,15 @@
-from typing import Annotated
+from typing import Annotated, Optional
 from pydantic import BaseModel, Field
 import requests
 
 from app.core.config import settings
+from app.core.event_bus import ProductionEventBus
 from app.core.logger import get_logger
+from app.models.events import EventType, Event
+from app.services.base_service import BaseService
 logger = get_logger(__name__)
 
-class ConversationAnswer(BaseModel):
-    isCallEnd: Annotated[bool, Field(description="是否结束通话")]
-    answer: Annotated[str, Field(description="回答")]
-    
-
-class ConversationService:
-    def __init__(self):
-        self.prompt = """
+prompt = """
 [ROLE]
 
 你是"广州大麦的 AI 外呼智能体小婷。使命：通过简洁电话对话确认潜在客户是否对"AI智能眼镜"产品感兴趣，并判断是否转人工同事跟进。
@@ -163,6 +159,16 @@ SECOND_PROBE 后仍模糊 → INTEREST_END
 
 准备就绪后，基于来电过程客户实时语句做出最合适的JSON格式回复。
 """
+
+class ConversationAnswer(BaseModel):
+    isCallEnd: Annotated[bool, Field(description="是否结束通话")]
+    answer: Annotated[str, Field(description="回答")]
+    
+
+class ConversationService(BaseService):
+    def __init__(self, event_bus: Optional[ProductionEventBus] = None):
+        super().__init__(event_bus, "ConversationService")
+        self.prompt = prompt
         self.model = "gpt-4.1"
         self.max_tokens = 5000
         self.url = settings.openai_url
@@ -173,7 +179,14 @@ SECOND_PROBE 后仍模糊 → INTEREST_END
             'Content-Type': 'application/json'
         }
 
-    def ai_decision(self, chat_log) -> ConversationAnswer:
+    async def initialize(self) -> bool:
+        return True
+
+    async def register_event_listeners(self):
+        await self._register_listener(EventType.CONVERSATION_ANSWER, self.ai_decision)
+
+    def ai_decision(self, event: Event) -> ConversationAnswer:
+        chat_log = event.data.get("chat_log")
         logger.info(f"用户对话记录: {chat_log}")
         full_content = f"{self.prompt}\n\n[当前对话记录]\n{chat_log}\n\n请根据以上规则和对话记录，给出合适的回复："
         
@@ -197,8 +210,6 @@ SECOND_PROBE 后仍模糊 → INTEREST_END
                 message = first_choice.get('message')
                 if message:
                     content = message.get('content')
-            
-            logger.info(f"AI返回内容: {content}")
             
             if content:
                 # 使用 model_validate_json 来解析 JSON 字符串
@@ -224,13 +235,3 @@ SECOND_PROBE 后仍模糊 → INTEREST_END
                 isCallEnd=False,
                 answer="系统处理出现问题，请稍后再试。"
             )
-
-
-# 创建全局实例
-conversation_service = ConversationService()
-
-#导出
-__all__ = ["conversation_service"]
-
-if __name__ == '__main__':
-    print(conversation_service.ai_decision("""广州大麦-月月: 面谈：陈婉雯，13509958485，40年家族企业，在佛山，做玻璃加工，想推广建筑玻璃，BToB，直播会议全程跟的，非常认可我们，最近在做升级，先谈一下看看，后面会来公司面谈 周五回复，我到时候联系她，高概率 随时沟通，解答了疑问，高概率 他们老板想继续过来下，晚点他给我具体时间确定""").replace("\n", " "))

@@ -5,6 +5,7 @@ from redis.exceptions import LockError, LockNotOwnedError
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
+from app.models.events import Event, EventType
 from app.utils.get_audio_devices import get_audio_devices
 from app.core.config import settings
 from app.core.event_bus import ProductionEventBus
@@ -81,6 +82,12 @@ class RedisService(BaseService):
             logger.error(f"❌ Redis service initialization failed: {e}")
             return False
     
+    async def register_event_listeners(self):
+        """注册事件监听器"""
+        if self.event_bus:
+            await self._register_listener(EventType.REDIS_ADD_DIALOG_RECORD, self.add_dialog_record)
+            await self._register_listener(EventType.REDIS_BIND_DIALOG_RECORD_TO_CALL_RECORD, self.bind_dialog_record_to_call_record)
+
     async def shutdown(self):
         """异步关闭 Redis 连接"""
         try:
@@ -248,7 +255,20 @@ class RedisService(BaseService):
                     logger.error(f"❌ Unexpected error releasing multi-lock: {e}")
 
     # ==================== 设备信息管理 ====================
-    
+
+    async def set_call_id_and_instance(self, event: Event) -> bool:
+        """
+        设置通话ID和实例
+        """
+        self._ensure_connected()
+        try:
+            self.call_id = event.data.get("call_id")
+            self.instance = event.data.get("instance")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set call id and instance: {e}")
+            return False
+
     async def set_device_info(self, device_info: DeviceInfo) -> bool:
         """
         设置设备信息（创建或更新）- 使用分布式锁
@@ -266,6 +286,7 @@ class RedisService(BaseService):
                     self.DEVICE_INFO_KEY, 
                     device_info.model_dump_json()
                 )
+                self.device_info = device_info
                 logger.info(f"Device info saved with lock: devid={device_info.devid}")
                 return True
         except Exception as e:
@@ -429,29 +450,6 @@ class RedisService(BaseService):
             logger.error(f"Failed to update call record ID: {e}")
             return False
 
-    async def _get_call_record_without_lock(self, call_id: str) -> Optional[CallRecord]:
-        """
-        内部方法：获取电话记录（不使用锁，避免递归锁）
-        
-        Args:
-            call_id: 电话记录ID
-            
-        Returns:
-            CallRecord: 电话记录对象，不存在时返回 None
-        """
-        try:
-            key = f"{self.CALL_RECORD_PREFIX}{call_id}"
-            data = self.redis_client.get(key)
-            
-            if not data:
-                return None
-            
-            call_record = CallRecord.model_validate_json(data)
-            return call_record
-        except Exception as e:
-            logger.error(f"Failed to get call record without lock: {e}")
-            return None
-
     async def get_call_record(self, call_id: str, lock: bool = True) -> Optional[CallRecord]:
         """
         获取电话记录
@@ -475,7 +473,7 @@ class RedisService(BaseService):
     
     async def _get_call_record_without_lock(self, call_id: str) -> Optional[CallRecord]:
         """
-        内部方法：获取电话记录（不使用锁，避免递归锁）
+        内部方法：获取电话记录
         """
         self._ensure_connected()
         try:
@@ -530,21 +528,6 @@ class RedisService(BaseService):
         except Exception as e:
             logger.error(f"Failed to create dialog record: {e}")
             return False
-
-    async def get_dialog_record(self, call_id: str, lock: bool = True) -> Optional[DialogRecord]:
-        """
-        获取对话记录
-        """
-        self._ensure_connected()
-        try:
-            if lock:
-                async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
-                    return await self._get_dialog_record_without_lock(call_id)
-            else:
-                return await self._get_dialog_record_without_lock(call_id)
-        except Exception as e:
-            logger.error(f"Failed to get dialog record: {e}")
-            return None
     
     async def _get_dialog_record_without_lock(self, call_id: str) -> Optional[DialogRecord]:
         """
@@ -563,22 +546,23 @@ class RedisService(BaseService):
             logger.error(f"Failed to get dialog record: {e}")
             return None
             
-    async def update_call_record_dialog_record(self, call_id: str, dialog_entry: DialogEntry) -> bool:
+    async def bind_dialog_record_to_call_record(self, event: Event) -> bool:
         """
         更新电话记录对话记录 - 使用分布式锁
         """
         self._ensure_connected()
         try:
-            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
+            call_id = event.data.get("call_id")
+            async with self.acquire_lock(f"{self.CALL_RECORD_PREFIX}{call_id}"):
                 dialog_record = await self._get_dialog_record_without_lock(call_id)
-                if not dialog_record:
+                call_record = await self._get_call_record_without_lock(call_id)
+                if not call_record:
                     logger.warning(f"Call record not found: {call_id}")
                     return False
-                dialog_record.dialog_record.append(dialog_entry)
-                await self.update_dialog_record(dialog_record)
+                call_record.dialog_record = dialog_record.dialog_record
                 self.redis_client.set(
-                    f"{self.DIALOG_RECORD_PREFIX}{call_id}",
-                    dialog_record.model_dump_json(),
+                    f"{self.CALL_RECORD_PREFIX}{call_id}",
+                    call_record.model_dump_json(),
                     ex=86400
                 )
                 return True
@@ -586,12 +570,14 @@ class RedisService(BaseService):
             logger.error(f"Failed to update call record dialog record: {e}")
             return False
     
-    async def add_dialog_record(self, call_id: str, dialog_entry: DialogEntry) -> bool:
+    async def add_dialog_record(self, event: Event) -> bool:
         """
         添加对话记录 - 使用分布式锁
         """
         self._ensure_connected()
         try:
+            call_id = event.data.get("call_id")
+            dialog_entry = event.data.get("dialog_entry")
             async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
                 dialog_record : Optional[DialogRecord] = await self._get_dialog_record_without_lock(call_id)
                 if not dialog_record:
@@ -621,20 +607,41 @@ class RedisService(BaseService):
                 if not dialog_record or not dialog_record.dialog_record:
                     return "客户没有说话"
                 
-                # 如果对话记录为空，返回"客户没有说话"
-                if not len(dialog_record.dialog_record) > dialog_record.dialog_record_reply_marking:
+                # 查找最后一个speaker为"agent"的记录索引
+                last_agent_index = -1
+                for i in range(len(dialog_record.dialog_record) - 1, -1, -1):
+                    if dialog_record.dialog_record[i].speaker == "agent":
+                        last_agent_index = i
+                        break
+                
+                # 如果没有找到agent记录，或者agent记录后没有新内容
+                if last_agent_index == -1 or last_agent_index >= len(dialog_record.dialog_record) - 1:
                     return "客户没有说话"
                 
-                # 获取标记位置之后的所有记录
-                new_records = dialog_record.dialog_record[dialog_record.dialog_record_reply_marking:]
+                # 获取最后一个agent记录之后的所有对话内容
+                new_records = dialog_record.dialog_record[last_agent_index + 1:]
                 
-                # 组合对话记录为字符串
+                # 如果没有新记录
+                if not new_records:
+                    return "客户没有说话"
+                
+                # 合并新记录的内容
                 dialog_text = ""
                 for entry in new_records:
                     dialog_text += entry.content
                 
+                # 删除原记录中的new_records（从last_agent_index + 1开始的所有记录）
+                dialog_record.dialog_record = dialog_record.dialog_record[:last_agent_index + 1]
+                
+                # 添加合并后的用户对话记录来替换被删除的记录
+                dialog_record.dialog_record.append(DialogEntry(
+                    speaker="user", 
+                    content=dialog_text, 
+                    timestamp=datetime.now()
+                ))
+                
                 # 更新回复标记为下一个位置
-                dialog_record.dialog_record_reply_marking = dialog_record.dialog_record_reply_marking + len(new_records)
+                dialog_record.dialog_record_reply_marking = len(dialog_record.dialog_record)
                 
                 # 保存更新后的记录到 Redis
                 self.redis_client.set(      
@@ -658,7 +665,7 @@ class RedisService(BaseService):
         try:
             async with self.acquire_lock(f"config_audio_device_info:{config_audio_device_info.id}"):
 
-                device_info = await self.get_device_info()
+                device_info = self.device_info
                 if not self.device_info:
                     logger.error("Device info not found")
                     raise ValueError("Device info not found")

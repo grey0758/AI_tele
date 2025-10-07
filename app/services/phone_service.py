@@ -2,14 +2,15 @@
 import asyncio
 from datetime import datetime
 import json
-from app.models.events import Event, EventPriority
+from re import A
+import websocket
+import threading
+from app.models.events import Event
 
 from pydantic import BaseModel, Field
-from app.models.events import EventListener, EventType
+from app.models.events import EventType
 from typing import Annotated, Dict, Any, Optional
 
-from websockets import connect
-from websockets.exceptions import ConnectionClosed
 from app.core.event_bus import ProductionEventBus
 from app.models.call_record import CallRecord, DialogEntry, DialogRecord
 from app.models.device_info import Device
@@ -22,10 +23,6 @@ from app.core.logger import get_logger
 
 # 获取模块级别的logger
 logger = get_logger(__name__)
-
-# class SendMessageType(Enum):
-#     CALL = "call"
-#     HANGUP = "hangup"
 
 class SendMessage(BaseModel):
     method: Annotated[str, Field(description="方法")]
@@ -41,24 +38,30 @@ class OnMessageType(BaseModel):
 
 class PhoneService(BaseService):
     """电话服务"""
-    
     def __init__(self, event_bus: Optional[ProductionEventBus] = None, redis_service: Optional[RedisService] = None):
         super().__init__(event_bus, "PhoneService")
         self.ws_url = "ws://127.0.0.1:9898/ws"
-        self.websocket = None
+        self.ws = None
+        self.ws_thread = None
         self.should_stop = False
-        self._service_task = None
         self._is_running = False
         self.redis_service = redis_service
 
         self.call_id = None
         self.instance = None
-        self.call_finished = False  
+        self.call_finished = False
+        
+        # 连接状态管理
+        self._connection_event = threading.Event()
+        self._connection_lock = threading.Lock()
+
+        self.agent_hang_up = threading.Event()
+        self.agent_hang_up.clear()
     
-    async def initialize(self):
+    async def initialize(self) -> bool:
         try:
             if not self._is_running:
-                self._service_task = asyncio.create_task(self._start_service())
+                self._connect()
                 self._is_running = True
                 logger.info("PhoneService 已启动")
                 return True
@@ -71,112 +74,145 @@ class PhoneService(BaseService):
         if not self.event_bus:
             return
         
-        await self._register_listener(EventType.CALL_OUT, self.handle_call_out, wait_for_result=False)
-        await self._register_listener(EventType.CALL_END, self.hang_up, wait_for_result=False)
+        await self._register_listener(EventType.CALL_OUT, self.handle_call_out)
+        await self._register_listener(EventType.CALL_END, self.hang_up)
+    
+    def _connect(self):
+        """建立 WebSocket 连接"""
+        if self.ws is not None:
+            logger.warning("WebSocket 连接已存在")
+            return 
         
-    async def _register_listener(self, event_type, handler, priority=EventPriority.NORMAL, **kwargs):
-        """辅助方法：减少重复代码"""
         try:
-            self.event_bus.register_listener(
-                EventListener(
-                    event_type=event_type,
-                    handler=handler,
-                    priority=priority,
-                    name=f"{self.service_name}_{handler.__name__}",
-                    **kwargs
-                )
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close
             )
-            logger.info(f"✅ {self.service_name}: 注册监听器 {event_type.value}")
-        except Exception as e:
-            logger.error(f"❌ {self.service_name}: 注册监听器失败 {event_type.value} | error={str(e)}")
-            raise
-    
-    async def _start_service(self):
-        """启动服务：连接 WebSocket 并开始监听消息"""
-        try:
-            logger.info(f"PhoneService 正在启动")
             
-            # 连接 WebSocket
-            if await self.connect():
-                logger.info(f"PhoneService 已连接 WebSocket，开始监听消息")
-                # 开始监听消息
-                await self.listen_messages()
-            else:
-                logger.error(f"PhoneService 连接 WebSocket 失败")
-                
+            def run_websocket():
+                self.ws.run_forever()
+            
+            self.ws_thread = threading.Thread(target=run_websocket, daemon=True)
+            self.ws_thread.start()
+            
         except Exception as e:
-            logger.error(f"PhoneService 启动失败: {e}")
-    
-    async def stop(self):
-        """停止服务"""
-        if self._is_running:
-            await self._stop_service()
-            self._is_running = False
-            logger.info("PhoneService 已停止")
-    
-    async def _stop_service(self):
-        """停止服务"""
+            logger.error(f"建立 WebSocket 连接异常: {e}")
+
+    def _on_open(self, ws):
+        """连接建立"""
+        self._connection_event.set()
+        logger.info("PhoneService WebSocket 连接已建立")
+
+    def _on_message(self, ws, message):
+        """处理消息"""
         try:
-            self.should_stop = True
-            await self.disconnect()
-            if self._service_task:
-                self._service_task.cancel()
-            logger.info(f"PhoneService 已停止")
+            data = json.loads(message)
+            logger.debug(f"收到消息: {data}")
+            
+            # 处理不同类型的消息
+            notify_type = data.get("notify")
+            
+            if notify_type == "OnConnect":
+                # 处理连接成功消息
+                asyncio.run(self.handle_on_connect_message(data))
+                logger.info("OnConnect 消息已处理")
+
+            elif notify_type == "OnAnswer":
+                # 处理接听事件
+                on_message = OnMessageType(         
+                    notify=notify_type,
+                    id=data.get("id"),
+                    instance=data.get("instance"),
+                    uuid=data.get("uuid")
+                )
+
+                asyncio.run(self.redis_service.update_call_record_call_id(self.call_id, on_message.uuid))
+
+                self.call_id = on_message.uuid
+                self.instance = on_message.instance
+
+                asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已接听"))
+
+                record = asyncio.run(self.redis_service.get_call_record(self.call_id))
+
+                tts_opening = record.tts_opening if record else ""
+
+                dialog_record = DialogRecord(
+                    call_id=self.call_id,
+                    dialog_record=[DialogEntry(speaker="agent", content=tts_opening, timestamp=datetime.now().isoformat())],
+                    dialog_record_reply_marking=0
+                )
+
+                asyncio.run(self.redis_service.create_dialog_record(dialog_record))
+
+                tts_send_text = {
+                    "text": tts_opening,
+                    "call_id": self.call_id,
+                    "instance": self.instance
+                }
+
+                asyncio.run(self.emit_event(EventType.TTS_SEND_TEXT, tts_send_text))
+                asyncio.run(self.emit_event(EventType.RTASR_START, self.call_id))
+                asyncio.run(asyncio.sleep(5))
+                asyncio.run(self.emit_event(EventType.RTASR_START_AUDIO, self.call_id))
+
+            elif notify_type == "OnCallOut":
+                # 处理呼出事件
+                pass
+                
+            elif notify_type == "OnCallIn":
+                # 处理呼入事件
+                pass
+
+            elif notify_type == "OnHangUp":
+                # 处理挂断事件
+                if self.agent_hang_up.is_set():
+                    self.agent_hang_up.clear()
+                else:
+                    logger.error(f"挂断事件，call_id: {self.call_id}, agent_hang_up: False")
+                    asyncio.run(self.emit_event(EventType.CALL_END, {"call_id": self.call_id, "agent_hang_up": False}))
+                asyncio.run(self.emit_event(EventType.AICALL_CALL_END, data={"call_id": self.call_id, "agent_hang_up": True}))    
+            else:
+                logger.debug(f"未知通知类型: {notify_type}")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"解析消息为 JSON 失败: {e}")
         except Exception as e:
-            logger.error(f"停止 PhoneService 时出错: {e}")
+            logger.error(f"处理消息时出错: {e}")
+
+    def _on_error(self, ws, error):
+        """错误处理"""
+        logger.error(f"PhoneService WebSocket 错误: {error}")
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        """连接关闭"""
+        self._connection_event.clear()
+        logger.info(f"PhoneService WebSocket 连接关闭: {close_status_code}, 消息: {close_msg}")
     
     def is_service_running(self) -> bool:
         """检查服务是否正在运行"""
-        return self._is_running and self.websocket is not None and not self.should_stop
+        return self._is_running and self.ws is not None and not self.should_stop
     
     def get_service_status(self) -> Dict[str, Any]:
         """获取服务状态信息"""
         return {
-            "websocket_connected": self.websocket is not None,
+            "websocket_connected": self.ws is not None,
             "service_running": self.is_service_running(),
             "should_stop": self.should_stop,
             "ws_url": self.ws_url
         }
     
-    async def restart_service(self):
-        """重启服务"""
-        try:
-            logger.info(f"正在重启 PhoneService")
-            await self._stop_service()
-            self.should_stop = False
-            await self._start_service()
-            logger.info(f"PhoneService 重启完成")
-        except Exception as e:
-            logger.error(f"重启 PhoneService 失败: {e}")
-    
-    async def connect(self) -> bool:
-        """连接到 WebSocket 服务器"""
-        try:
-            logger.info(f"Connecting to WebSocket: {self.ws_url}")
-            self.websocket = await connect(self.ws_url)
-            logger.info("WebSocket connected successfully")
-            return True
-        except Exception as e:
-            logger.error(f"WebSocket connection failed: {e}")
-            return False
-    
-    async def disconnect(self):
-        """断开 WebSocket 连接"""
-        if self.websocket:
-            try:
-                await self.websocket.close()
-                logger.info("WebSocket disconnected")
-            except Exception as e:
-                logger.error(f"Error disconnecting WebSocket: {e}")
-    
-    async def send_message(self, message_data: SendMessage) -> bool:
+    def send_message(self, message_data: SendMessage) -> bool:
         """发送消息到 WebSocket 服务器"""
-        if not self.websocket:
+        if not self.ws:
             logger.error("WebSocket not connected")
             return False
         
         try:
-            await self.websocket.send(message_data.model_dump_json())
+            self.ws.send(message_data.model_dump_json(exclude_none=True))
             logger.debug(f"Sent message: {message_data}")
             return True
         except Exception as e:
@@ -211,7 +247,7 @@ class PhoneService(BaseService):
             logger.info(f"Dialing {call_record.phone_number} with instance {call_record.instance}")
             
             # 检查WebSocket连接状态
-            if not self.websocket:
+            if not self.ws:
                 logger.error("WebSocket not connected")
                 return {
                     "success": False,
@@ -220,7 +256,7 @@ class PhoneService(BaseService):
                     "message": "拨号失败，请检查连接状态"
                 }
 
-            await self.send_message(dial_message)
+            self.send_message(dial_message)
             
             call_record.status = "already_dialed"  
             call_record.start_time = datetime.now()
@@ -260,38 +296,35 @@ class PhoneService(BaseService):
         Returns:
             Dict: 挂断结果
         """
-        try:
-            instance = self.instance
 
-            hang_up_message = SendMessage(
-                method="terminateCall",
-                instance=instance,
-            )
-            
-            logger.info(f"Hanging up call on instance {instance}")
-            
-            await self.send_message(hang_up_message)
-            
-            if True:
-                return {
-                    "success": True,
-                    "instance": instance,
-                    "message": "挂断请求已发送"
-                }
-            else:
-                return {
-                    "success": False,
-                    "instance": instance,
-                    "error": "发送挂断消息失败"
-                }
+        if event.data.get("agent_hang_up"):
+            self.agent_hang_up.set()
+            try:
+                instance = self.instance
+
+                hang_up_message = SendMessage(
+                    method="terminateCall",
+                    instance=instance
+                )
                 
-        except Exception as e:
-            logger.error(f"Error hanging up call on instance {instance}: {e}")
-            return {
-                "success": False,
-                "instance": instance,
-                "error": str(e)
-            }
+                logger.info(f"Hanging up call on instance {instance}")
+                
+                self.send_message(hang_up_message)
+                await self.emit_event(EventType.TTS_CALL_END, data={"call_id": self.call_id, "agent_hang_up": True})
+                await self.emit_event(EventType.RECORD_CALL_END, data={"call_id": self.call_id, "agent_hang_up": True})
+                await self.emit_event(EventType.RTASR_CALL_END, data={"call_id": self.call_id, "agent_hang_up": True})
+                await self._call_finished()
+                return True
+
+            except Exception as e:
+                logger.error(f"Error hanging up call on instance {e}")
+                return False
+
+        await self.emit_event(EventType.TTS_CALL_END, data={"call_id": self.call_id, "agent_hang_up": False})
+        await self.emit_event(EventType.RECORD_CALL_END, data={"call_id": self.call_id, "agent_hang_up": False})
+        await self.emit_event(EventType.RTASR_CALL_END, data={"call_id": self.call_id, "agent_hang_up": False})
+        await self._call_finished()
+        return True
     
     async def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
         try:
@@ -321,98 +354,30 @@ class PhoneService(BaseService):
                 "message": "处理连接消息失败"
             }
     
-    async def listen_messages(self):
-        """监听 WebSocket 消息"""
-        if not self.websocket:
-            logger.error("WebSocket not connected")
-            return
-        
-        try:
-            async for message in self.websocket:
-                if self.should_stop:
-                    break
-                
-                try:
-                    data = json.loads(message)
-                    logger.debug(f"Received message: {data}")
-                    
-                    # 处理不同类型的消息
-                    notify_type = data.get("notify")
-                    
-                    if notify_type == "OnConnect":
-                        # 处理连接成功消息
-                        result = await self.handle_on_connect_message(data)
-                        logger.info(f"OnConnect handled: {result}")
-
-                    elif notify_type == "OnAnswer":
-                        # 处理接听事件
-                        on_message = OnMessageType(         
-                            notify=notify_type,
-                            id=data.get("id"),
-                            instance=data.get("instance"),
-                            uuid=data.get("uuid")
-                        )
-
-                        await self.redis_service.update_call_record_call_id(self.call_id,on_message.uuid)
-
-                        self.call_id = on_message.uuid
-                        self.instance = on_message.instance
-
-                        await self.redis_service.update_call_record_status(call_id=self.call_id, status="已接听")
-
-                        record = await self.redis_service.get_call_record(self.call_id)
-
-                        tts_opening = record.tts_opening if record else ""
-
-                        dialog_record = DialogRecord(
-                            call_id=self.call_id,
-                            dialog_record=[DialogEntry(speaker="agent", content=tts_opening, timestamp=datetime.now().isoformat())],
-                            dialog_record_reply_marking=0
-                        )
-
-                        await self.redis_service.create_dialog_record(dialog_record)
-
-                        tts_send_text = {
-                            "text": tts_opening,
-                            "call_id": self.call_id,
-                            "instance": self.instance
-                        }
-
-                        await self.emit_event(EventType.TTS_SEND_TEXT, tts_send_text)
-                        await self.emit_event(EventType.RTASR_START, self.call_id)
-                        await asyncio.sleep(5)
-                        await self.emit_event(EventType.RTASR_START_AUDIO, self.call_id)
-
-                    elif notify_type == "OnCallOut":
-                        # 处理呼出事件
-                        pass
-                        
-                    elif notify_type == "OnCallIn":
-                        # 处理呼入事件
-                        pass
-
-                    elif notify_type == "OnHangUp":
-                        # 处理挂断事件
-                        await self._call_finished()
-                        
-                    else:
-                        logger.debug(f"Unknown notify type: {notify_type}")
-                        
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse message as JSON: {e}")
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    
-        except ConnectionClosed:
-            logger.info("WebSocket connection closed")
-        except Exception as e:
-            logger.error(f"Error in message listener: {e}")
-        finally:
-            logger.info("Message listener stopped")
     
     async def _call_finished(self):
         """通话结束"""
         self.call_finished = True
         self.call_id = None
         self.instance = None
-        await self.emit_event(EventType.CALL_END, None)
+    
+    def stop(self):
+        """停止 PhoneService"""
+        logger.info("停止 PhoneService...")
+        
+        self.should_stop = True
+        
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception as e:
+                logger.warning("关闭 WebSocket 时出错: %s", e)
+        
+        if hasattr(self, 'ws_thread') and self.ws_thread and self.ws_thread.is_alive():
+            self.ws_thread.join(timeout=5.0)
+            if self.ws_thread.is_alive():
+                logger.warning("WebSocket 线程未能在5秒内正常退出")
+        
+        self._is_running = False
+        logger.info("PhoneService 已停止")
+        

@@ -317,7 +317,7 @@ class ProductionEventBus:
         
         # 更新指标
         await self._update_metrics(completed_events=1)
-        await self._log_event(event, "completed")
+        await self._log_event(event, "completed", processing_time=processing_time)
     
     async def _handle_event_error(self, event: Event, error: Exception):
         """处理事件错误"""
@@ -406,13 +406,14 @@ class ProductionEventBus:
             
             self.metrics.last_updated = datetime.now()
     
-    async def _log_event(self, event: Event, action: str, worker_id: str = None, error: str = None):
+    async def _log_event(self, event: Event, action: str, worker_id: str = None, error: str = None, processing_time: float = None):
         """记录事件日志"""
         log_data = {
             "event_id": event.event_id,
             "event_type": event.type.value,
             "action": action,
             "timestamp": datetime.now().isoformat(),
+            'processing_time': processing_time,
             "correlation_id": event.correlation_id,
             "source": event.source,
             "worker_id": worker_id,

@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     
     # Server Configuration
     host: str = Field(default="0.0.0.0", description="Server host")
-    port: int = Field(default=8000, description="Server port")
+    port: int = Field(default=8020, description="Server port")
 
     # Redis Configuration
     redis_host: str = Field(default="localhost", description="Redis host")
@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     health_check_interval: int = Field(default=30, description="Health check interval in seconds")
     enable_persistence: bool = Field(default=True, description="Enable event persistence to disk")
     persistence_path: str = Field(default="./logs/events", description="Path for event persistence")
+
+    #ai tele record service
+    ai_tele_record_service_url: str = Field(default="http://localhost:8081", description="AI Tele record service URL")
     
     class Config:
         env_file = ".env"

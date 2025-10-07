@@ -77,8 +77,5 @@ if __name__ == "__main__":
         "main:app",
         host=settings.host,
         port=settings.port,
-        reload=settings.debug,
-        reload_dirs=["."],
-        reload_excludes=["logs/**/*", "*.log", "uploads/*", "**/__pycache__/*", "logs/"],
         log_level="info"
     )
