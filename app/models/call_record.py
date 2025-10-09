@@ -42,7 +42,6 @@ class DialogRecord(BaseModel):
     """对话记录数据类"""
     call_id: Annotated[str, Field(description="通话唯一标识")]
     dialog_record: Annotated[List[DialogEntry], Field(default_factory=list, description="对话记录列表")]
-    dialog_record_reply_marking: Annotated[int, Field(default_factory=lambda: 0, description="对话记录回复标记")]
 
 class CallRecord(BaseModel):
     """电话记录数据类"""

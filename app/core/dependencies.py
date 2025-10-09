@@ -14,6 +14,7 @@ from app.db.database import Database
 from app.services.redis_service import RedisService
 from app.services.phone_service import PhoneService
 from app.services.aicall_service import AicallService
+from app.services.realtime_service import RealtimeService
 
 logger = get_logger(__name__)
 
@@ -70,6 +71,7 @@ class EnhancedServiceContainer:
         self._services["redis_service"] = RedisService(self._event_bus)
         self._services["phone_service"] = PhoneService(self._event_bus, self._services["redis_service"])
         self._services["aicall_service"] = AicallService(self._event_bus, self._services["redis_service"])
+        self._services["realtime_service"] = RealtimeService(self._event_bus, self._services["redis_service"])
 
         for name, service in self._services.items():
             if hasattr(service, "initialize"):
@@ -191,6 +193,10 @@ def get_phone_service() -> PhoneService:
 def get_aicall_service() -> AicallService:
     """获取ai电话服务"""
     return service_container.get_service("aicall_service")
+
+def get_realtime_service() -> RealtimeService:
+    """获取实时服务"""
+    return service_container.get_service("realtime_service")
 
 
 def get_all_services() -> Dict[str, Any]:

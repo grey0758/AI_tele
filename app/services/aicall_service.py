@@ -29,9 +29,7 @@ class AicallService(BaseService):
 
     async def register_event_listeners(self):
         """注册事件监听器"""
-        await self._register_listener(
-            EventType.AICALL_CALL_END, self.reset_to_initialized_state
-        )
+        await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self.reset_to_initialized_state)
 
     async def make_call(self, call_request: CallRequest):
         """
@@ -65,8 +63,7 @@ class AicallService(BaseService):
 
             await self.redis_service.create_call_record(call_record)
 
-            # 发出通话开始事件
-            await self.emit_event(EventType.CALL_OUT, call_record)
+            await self.emit_event(EventType.PHONE_SERVICE_CALL_OUT, call_record)
             logger.info("Call initiated to %s", call_record.phone_number)
 
         except Exception as e:  # pylint: disable=broad-except

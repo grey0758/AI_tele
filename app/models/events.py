@@ -11,28 +11,15 @@ from app.core.config import settings
 
 class EventType(Enum):
     """事件类型"""
-    CALL_OUT = "call.out"
-    CALL_END = "call.end"
+    PHONE_SERVICE_CALL_OUT = "phone_service.call_out"
+    PHONE_SERVICE_ONANSWER = "phone_service.onanswer"
+    PHONE_SERVICE_ONHANGUP = "phone_service.onhangup"
+    PHONE_SERVICE_TERMINATECALL = "phone_service.terminatecall"
 
-    AICALL_CALL_END = "aicall.call_end"
     RECORD_CALL_END = "record.call_end"
-    TTS_CALL_END = "tts.call_end"
-
-    TTS_SEND_TEXT = "tts.send_text"
-    TTS_CONNECT = "tts.connect"
-
-    RTASR_START = "rtasr.start"
-    RTASR_STOP = "rtasr.stop"
-    RTASR_START_AUDIO = "rtasr.start_audio"
-    RTASR_STOP_AUDIO = "rtasr.stop_audio"
-    RTASR_CALL_END = "rtasr.call_end"
-
-    RECORD_UPLOAD_RECORD = "record.upload_record"
 
     REDIS_ADD_DIALOG_RECORD = "redis.add_dialog_record"
     REDIS_BIND_DIALOG_RECORD_TO_CALL_RECORD = "redis.bind_dialog_record_to_call_record"
-
-    CONVERSATION_ANSWER = "conversation.answer"
 
     # 自定义事件
     CUSTOM = "custom"

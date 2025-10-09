@@ -87,8 +87,9 @@ class PhoneService(BaseService):
         if not self.event_bus:
             return
 
-        await self._register_listener(EventType.CALL_OUT, self.handle_call_out)
-        await self._register_listener(EventType.CALL_END, self.hang_up)
+        await self._register_listener(EventType.PHONE_SERVICE_CALL_OUT, self.handle_call_out)
+        await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self._call_finished)
+        await self._register_listener(EventType.PHONE_SERVICE_TERMINATECALL, self.hang_up, timeout=20.0)
 
     def _connect(self):
         """建立 WebSocket 连接"""
@@ -142,20 +143,14 @@ class PhoneService(BaseService):
                     uuid=data.get("uuid"),
                 )
 
-                asyncio.run(
-                    self.redis_service.update_call_record_call_id(
-                        self.call_id, on_message.uuid
-                    )
-                )
+                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))
+
+                asyncio.run(self.redis_service.update_call_record_call_id(self.call_id, on_message.uuid))
 
                 self.call_id = on_message.uuid
                 self.instance = on_message.instance
 
-                asyncio.run(
-                    self.redis_service.update_call_record_status(
-                        call_id=self.call_id, status="已接听"
-                    )
-                )
+                asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已接听"))
 
                 record = asyncio.run(self.redis_service.get_call_record(self.call_id))
 
@@ -169,13 +164,10 @@ class PhoneService(BaseService):
                             content=tts_opening,
                             timestamp=datetime.now().isoformat(),
                         )
-                    ],
-                    dialog_record_reply_marking=0,
+                    ]
                 )
 
                 asyncio.run(self.redis_service.create_dialog_record(dialog_record))
-
-
 
             elif notify_type == "OnCallOut":
                 # 处理呼出事件
@@ -187,24 +179,13 @@ class PhoneService(BaseService):
 
             elif notify_type == "OnHangUp":
                 # 处理挂断事件
+                agent_hang_up = False
                 if self.agent_hang_up.is_set():
                     self.agent_hang_up.clear()
-                else:
-                    logger.error(
-                        "挂断事件，call_id: %s, agent_hang_up: False", self.call_id
-                    )
-                    asyncio.run(
-                        self.emit_event(
-                            EventType.CALL_END,
-                            {"call_id": self.call_id, "agent_hang_up": False},
-                        )
-                    )
-                asyncio.run(
-                    self.emit_event(
-                        EventType.AICALL_CALL_END,
-                        data={"call_id": self.call_id, "agent_hang_up": True},
-                    )
-                )
+                    agent_hang_up = True
+                asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已挂断"))
+                asyncio.run(self.redis_service.bind_dialog_record_to_call_record(call_id=self.call_id))
+                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_id, "instance": self.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)
 
@@ -287,11 +268,7 @@ class PhoneService(BaseService):
                 CustomId=call_record.custom_id,
             )
 
-            logger.info(
-                "Dialing %s with instance %s",
-                call_record.phone_number,
-                call_record.instance,
-            )
+            logger.info("Dialing %s with instance %s", call_record.phone_number, call_record.instance,)
 
             # 检查WebSocket连接状态
             if not self.ws:
@@ -333,39 +310,13 @@ class PhoneService(BaseService):
                 "message": f"拨号异常: {str(e)}",
             }
 
-    async def hang_up(self, event: Event = None) -> Dict[str, Any]:
-        """
-        挂断电话
-
-        Args:
-            event: 事件
-
-        Returns:
-            Dict: 挂断结果
-        """
-
-        if event.data.get("agent_hang_up"):
-            self.agent_hang_up.set()
-            try:
-                instance = self.instance
-
-                hang_up_message = SendMessage(method="terminateCall", instance=instance)
-
-                logger.info("Hanging up call on instance %s", instance)
-
-                self.send_message(hang_up_message)
-                await self._call_finished()
-                return True
-
-            except Exception as e:  # pylint: disable=broad-except
-                logger.error("Error hanging up call on instance %s", e)
-                return False
-
-        await self.emit_event(
-            EventType.RECORD_CALL_END,
-            data={"call_id": self.call_id, "agent_hang_up": False},
-        )
-        await self._call_finished()
+    async def hang_up(self, _: Event = None) -> bool:
+        """挂断电话"""
+        await asyncio.sleep(7)
+        hang_up_message = SendMessage(method="terminateCall", instance=self.instance)
+        self.agent_hang_up.set()
+        self.send_message(hang_up_message)
+        logger.info("Hanging up call on instance %s", self.instance)
         return True
 
     async def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
@@ -395,7 +346,7 @@ class PhoneService(BaseService):
             logger.error("Error handling OnConnect message: %s", e)
             return {"success": False, "error": str(e), "message": "处理连接消息失败"}
 
-    async def _call_finished(self):
+    async def _call_finished(self, _: Event = None):
         """通话结束"""
         self.call_finished = True
         self.call_id = None

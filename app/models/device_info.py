@@ -47,7 +47,6 @@ class DeviceInfo(BaseModel):
     recordmode: Annotated[int | None, Field(default=None, description="录音模式")]
     devices: Annotated[List[Device], Field(default_factory=list, description="设备列表")]
 
-
 class ConfigAudioDeviceInfo(BaseModel):
     """配置音频设备信息数据类"""
     id: Annotated[str, Field(default_factory=lambda: str(uuid.uuid4()), description="UUID")]

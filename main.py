@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.api.v1.api import api_router
@@ -62,10 +61,6 @@ app.add_middleware(
 
 # 注册API路由
 app.include_router(api_router, prefix="/api/v1")
-
-# 添加静态文件服务
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_request: Request, exc: HTTPException):

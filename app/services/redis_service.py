@@ -84,14 +84,7 @@ class RedisService(BaseService):
 
     async def register_event_listeners(self):
         """注册事件监听器"""
-        if self.event_bus:
-            await self._register_listener(
-                EventType.REDIS_ADD_DIALOG_RECORD, self.add_dialog_record
-            )
-            await self._register_listener(
-                EventType.REDIS_BIND_DIALOG_RECORD_TO_CALL_RECORD,
-                self.bind_dialog_record_to_call_record,
-            )
+        await self._register_listener(EventType.REDIS_ADD_DIALOG_RECORD, self.add_dialog_record)
 
     async def shutdown(self):
         """异步关闭 Redis 连接"""
@@ -565,18 +558,20 @@ class RedisService(BaseService):
             logger.error("Failed to get dialog record: %s", e)
             return None
 
-    async def bind_dialog_record_to_call_record(self, event: Event) -> bool:
+    async def bind_dialog_record_to_call_record(self, call_id: str) -> bool:
         """
         更新电话记录对话记录 - 使用分布式锁
         """
         self._ensure_connected()
         try:
-            call_id = event.data.get("call_id")
             async with self.acquire_lock(f"{self.CALL_RECORD_PREFIX}{call_id}"):
                 dialog_record = await self._get_dialog_record_without_lock(call_id)
                 call_record = await self._get_call_record_without_lock(call_id)
                 if not call_record:
                     logger.warning("Call record not found: %s", call_id)
+                    return False
+                if not dialog_record:
+                    logger.warning("Dialog record not found: %s", call_id)
                     return False
                 call_record.dialog_record = dialog_record.dialog_record
                 self.redis_client.set(
@@ -593,17 +588,19 @@ class RedisService(BaseService):
         """
         添加对话记录 - 使用分布式锁
         """
+        logger.debug("Adding dialog record: %s", event.data)
         self._ensure_connected()
         try:
-            call_id = event.data.get("call_id")
-            dialog_entry = event.data.get("dialog_entry")
+            call_id : str = event.data.get("call_id")
+            dialog_entry : DialogEntry = event.data.get("dialog_entry")
             async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
-                dialog_record: Optional[
-                    DialogRecord
-                ] = await self._get_dialog_record_without_lock(call_id)
+                dialog_record: DialogRecord | None = await self._get_dialog_record_without_lock(call_id)
                 if not dialog_record:
-                    logger.warning("Dialog record not found: %s", call_id)
-                    return False
+                    logger.debug("Dialog record not found, creating new one for call_id: %s", call_id)
+                    dialog_record = DialogRecord(
+                        call_id=call_id,
+                        dialog_record=[]
+                    )
                 dialog_record.dialog_record.append(dialog_entry)
                 self.redis_client.set(
                     f"{self.DIALOG_RECORD_PREFIX}{call_id}",
@@ -615,74 +612,6 @@ class RedisService(BaseService):
             logger.error("Failed to add dialog record: %s", e)
             return False
 
-    async def get_dialog_after_marking(self, call_id: str) -> str:
-        """
-        获取标记后的对话记录并更新标记 - 使用分布式锁
-        """
-        self._ensure_connected()
-        try:
-            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
-                # 从Redis获取对话记录
-                dialog_record = await self._get_dialog_record_without_lock(call_id)
-
-                if not dialog_record or not dialog_record.dialog_record:
-                    return "客户没有说话"
-
-                # 查找最后一个speaker为"agent"的记录索引
-                last_agent_index = -1
-                for i in range(len(dialog_record.dialog_record) - 1, -1, -1):
-                    if dialog_record.dialog_record[i].speaker == "agent":
-                        last_agent_index = i
-                        break
-
-                # 如果没有找到agent记录，或者agent记录后没有新内容
-                if (
-                    last_agent_index == -1
-                    or last_agent_index >= len(dialog_record.dialog_record) - 1
-                ):
-                    return "客户没有说话"
-
-                # 获取最后一个agent记录之后的所有对话内容
-                new_records = dialog_record.dialog_record[last_agent_index + 1 :]
-
-                # 如果没有新记录
-                if not new_records:
-                    return "客户没有说话"
-
-                # 合并新记录的内容
-                dialog_text = ""
-                for entry in new_records:
-                    dialog_text += entry.content
-
-                # 删除原记录中的new_records（从last_agent_index + 1开始的所有记录）
-                dialog_record.dialog_record = dialog_record.dialog_record[
-                    : last_agent_index + 1
-                ]
-
-                # 添加合并后的用户对话记录来替换被删除的记录
-                dialog_record.dialog_record.append(
-                    DialogEntry(
-                        speaker="user", content=dialog_text, timestamp=datetime.now()
-                    )
-                )
-
-                # 更新回复标记为下一个位置
-                dialog_record.dialog_record_reply_marking = len(
-                    dialog_record.dialog_record
-                )
-
-                # 保存更新后的记录到 Redis
-                self.redis_client.set(
-                    f"{self.DIALOG_RECORD_PREFIX}{call_id}",
-                    dialog_record.model_dump_json(),
-                    ex=86400,
-                )
-
-                logger.info("Dialog after marking retrieved with lock: %s", call_id)
-                return dialog_text.strip()
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Failed to get dialog after marking: %s", e)
-            return "客户没有说话"
 
     async def set_device_info_input_audio_and_output_audio(
         self, config_audio_device_info: ConfigAudioDeviceInfo
@@ -702,51 +631,41 @@ class RedisService(BaseService):
 
                 input_devices, output_devices = get_audio_devices(deduplicate=True)
 
-                for device in device_info.devices:
-                    if (
-                        config_audio_device_info.config_audio_device_info_mapping.device.instance
-                        == device.instance
-                    ):
-                        config_audio_device_info.config_audio_device_info_mapping.device = device
+                for config_device in config_audio_device_info.device:
+                    for device in device_info.devices:
+                        if config_device.instance == device.instance:
+                            config_device = device
+                            break
+                        elif device.deviceId == config_device.deviceId:
+                            config_device = device
+                            break
 
-                    elif (
-                        device.deviceId
-                        == config_audio_device_info.config_audio_device_info_mapping.device.deviceId
-                    ):
-                        config_audio_device_info.config_audio_device_info_mapping.device = device
+                    if config_device.input_devices:
+                        for input_device in input_devices:
+                            if input_device.index == config_device.input_devices.index:
+                                config_device.input_devices = input_device
+                                break
+                            elif input_device.name == config_device.input_devices.name:
+                                config_device.input_devices = input_device
+                                break
 
-                    for input_device in input_devices:
-                        if (
-                            input_device.index
-                            == config_audio_device_info.config_audio_device_info_mapping.input_audio.index
-                        ):
-                            config_audio_device_info.config_audio_device_info_mapping.input_audio = input_device
-                        elif (
-                            input_device.name
-                            == config_audio_device_info.config_audio_device_info_mapping.input_audio.name
-                        ):
-                            config_audio_device_info.config_audio_device_info_mapping.input_audio = input_device
-
-                    for output_device in output_devices:
-                        if (
-                            output_device.index
-                            == config_audio_device_info.config_audio_device_info_mapping.output_audio.index
-                        ):
-                            config_audio_device_info.config_audio_device_info_mapping.output_audio = output_device
-                        elif (
-                            output_device.name
-                            == config_audio_device_info.config_audio_device_info_mapping.output_audio.name
-                        ):
-                            config_audio_device_info.config_audio_device_info_mapping.output_audio = output_device
+                    if config_device.output_devices:
+                        for output_device in output_devices:
+                            if output_device.index == config_device.output_devices.index:
+                                config_device.output_devices = output_device
+                                break
+                            elif output_device.name == config_device.output_devices.name:
+                                config_device.output_devices = output_device
+                                break
 
                 self.redis_client.set(
                     f"{self.CONFIG_INPUT_AUDIO_KEY}",
                     config_audio_device_info.model_dump_json(),
-                    ex=None,  # 不过期
+                    ex=None,
                 )
                 logger.info(
                     "Config audio device info saved with lock: %s", config_audio_device_info.id
                 )
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             logger.error("Failed to save config audio device info: %s", e)
             raise e

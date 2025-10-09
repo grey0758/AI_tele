@@ -38,6 +38,9 @@ dependencies = [
     "rich",
     # 文件处理
     "aiofiles",
+    "pyaudio>=0.2.14",
+    "aiomysql>=0.2.0",
+    "types-pyaudio>=0.2.16.20250801",
 ]
 
 [project.optional-dependencies]
