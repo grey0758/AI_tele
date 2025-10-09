@@ -69,6 +69,9 @@ cloud = [
 [tool.uv]
 link-mode = "copy"
 
+[tool.uv.pip]
+index-url = "https://mirrors.aliyun.com/pypi/simple/"
+
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["tests*", "alembic*", "logs*", "uploads*"]
