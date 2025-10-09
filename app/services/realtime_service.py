@@ -154,7 +154,7 @@ WS_CONNECT_CONFIG = {
     }
 }
 
-START_SESSION_REQ = {
+START_SESSION_REQ_1 = {
     "asr": {
         "extra": {
             "end_smooth_window_ms": 2000,
@@ -186,7 +186,7 @@ START_SESSION_REQ = {
     }
 }
 
-START_SESSION_REQ_1 = {
+START_SESSION_REQ = {
     "asr": {
         "extra": {
             "end_smooth_window_ms": 1000,

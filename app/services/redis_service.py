@@ -56,6 +56,7 @@ class RedisService(BaseService):
                 password=settings.redis_password,
                 db=settings.redis_db,
                 connection_class=redis.SSLConnection,
+                ssl_cert_reqs=settings.redis_ssl,  # 禁用 SSL 证书验证
                 # 连接配置
                 decode_responses=True,
                 socket_connect_timeout=5,
