@@ -60,7 +60,7 @@ def main():
     appid = "7053540602"
     token = "Z9q4zthzIu5w4RfuFEJbUZCRM8Z_gJBW"
     audio_path = r"E:\xyh\9.18\215\10月10日(1).WAV"
-    spk_id = "S_58MO6EIG1"
+    spk_id = "S_JGlN6EIG1"
 
     try:
         logger.info("开始训练语音，参数: appid=%s, audio_path=%s, spk_id=%s", appid, audio_path, spk_id)

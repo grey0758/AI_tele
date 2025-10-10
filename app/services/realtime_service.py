@@ -159,7 +159,7 @@ START_SESSION_REQ_1 = {
         },
     },
     "tts": {
-        "speaker": "ICL_zh_female_aojiaonvyou_tob",
+        "speaker": "S_58MO6EIG1",
         "audio_config": {
             "channel": 1,
             "format": "pcm",
@@ -327,6 +327,14 @@ class RealtimeDialogClient:
         if self.output_audio_format == "pcm_s16le":
             START_SESSION_REQ["tts"]["audio_config"]["format"] = "pcm_s16le"
         request_params = START_SESSION_REQ
+        
+        # 打印StartSession请求的所有参数
+        logger.info("发送StartSession请求，事件ID: 100")
+        logger.info("StartSession请求参数:")
+        logger.info("ASR配置: %s", json.dumps(request_params.get("asr", {}), ensure_ascii=False, indent=2))
+        logger.info("TTS配置: %s", json.dumps(request_params.get("tts", {}), ensure_ascii=False, indent=2))
+        logger.info("Dialog配置: %s", json.dumps(request_params.get("dialog", {}), ensure_ascii=False, indent=2))
+        
         payload_bytes = str.encode(json.dumps(request_params))
         payload_bytes = gzip.compress(payload_bytes)
         start_session_request = bytearray(self.generate_header())
@@ -336,7 +344,11 @@ class RealtimeDialogClient:
         start_session_request.extend((len(payload_bytes)).to_bytes(4, 'big'))
         start_session_request.extend(payload_bytes)
         await self.ws.send(start_session_request)
-        await self.ws.recv()
+        response = await self.ws.recv()
+        
+        # 解析并打印StartSession响应
+        response_data = self.parse_response(response)
+        logger.info("StartSession响应: %s", json.dumps(response_data, ensure_ascii=False, indent=2))
         logger.info("StartSession 成功，开始对话")
 
     async def say_hello(self) -> None:
@@ -547,19 +559,10 @@ class RealtimeDialogClient:
             payload_msg = payload[4:]
         elif message_type == SERVER_ERROR_RESPONSE:
             result['message_type'] = 'SERVER_ERROR'
-            if len(payload) >= 4:
-                code = int.from_bytes(payload[:4], "big", signed=False)
-                result['code'] = code
-                if len(payload) >= 8:
-                    payload_size = int.from_bytes(payload[4:8], "big", signed=False)
-                    payload_msg = payload[8:]
-                else:
-                    payload_size = 0
-                    payload_msg = b''
-            else:
-                result['code'] = 0
-                payload_size = 0
-                payload_msg = b''
+            code = int.from_bytes(payload[:4], "big", signed=False)
+            result['code'] = code
+            payload_size = int.from_bytes(payload[4:8], "big", signed=False)
+            payload_msg = payload[8:]
         if payload_msg is None:
             return result
         if message_compression == GZIP:
@@ -711,6 +714,12 @@ class DialogSession:
             # 只记录重要的事件，减少日志噪音
             if event in [450, 350, 359, 152, 153]:
                 logger.info("服务器响应: event=%s, session_id=%s", event, response.get('session_id'))
+            elif event == 150:  # SessionStarted - 会话启动成功
+                logger.info("会话启动成功，事件ID: %s", event)
+                logger.info("SessionStarted响应: %s", json.dumps(payload_msg, ensure_ascii=False, indent=2))
+            elif event == 154:  # UsageResponse - 用量信息
+                logger.info("收到用量信息，事件ID: %s", event)
+                logger.info("UsageResponse: %s", json.dumps(payload_msg, ensure_ascii=False, indent=2))
             elif event == 451:  # ASR 结果
                 # 只记录最终结果，不记录中间结果
                 if payload_msg.get('results') and not payload_msg['results'][0].get('is_interim', True):
