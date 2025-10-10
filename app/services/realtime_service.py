@@ -547,10 +547,19 @@ class RealtimeDialogClient:
             payload_msg = payload[4:]
         elif message_type == SERVER_ERROR_RESPONSE:
             result['message_type'] = 'SERVER_ERROR'
-            code = int.from_bytes(payload[:4], "big", signed=False)
-            result['code'] = code
-            payload_size = int.from_bytes(payload[4:8], "big", signed=False)
-            payload_msg = payload[8:]
+            if len(payload) >= 4:
+                code = int.from_bytes(payload[:4], "big", signed=False)
+                result['code'] = code
+                if len(payload) >= 8:
+                    payload_size = int.from_bytes(payload[4:8], "big", signed=False)
+                    payload_msg = payload[8:]
+                else:
+                    payload_size = 0
+                    payload_msg = b''
+            else:
+                result['code'] = 0
+                payload_size = 0
+                payload_msg = b''
         if payload_msg is None:
             return result
         if message_compression == GZIP:
