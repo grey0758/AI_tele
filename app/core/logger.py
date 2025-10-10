@@ -1,4 +1,5 @@
-# -*- coding: utf-8 -*-
+"""日志配置"""
+# app/core/logger.py
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -15,8 +16,11 @@ def setup_logging():
     # 清理已存在的处理器，避免重复添加
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
-    root_logger.setLevel(getattr(logging, settings.log_level.upper()))
-    
+    root_logger.setLevel(getattr(logging, settings.log_level))
+
+    # 关闭websockets库的调试日志
+    logging.getLogger('websockets').setLevel(logging.WARNING)
+
     # Rich 控制台处理器
     console_handler = RichHandler(
         console=Console(stderr=True),
@@ -25,8 +29,8 @@ def setup_logging():
         markup=True,
         rich_tracebacks=True
     )
-    console_handler.setLevel(logging.INFO)
-    
+    console_handler.setLevel(getattr(logging, settings.log_level))
+
     # 轮转文件处理器，避免单文件变大导致频繁变更
     file_handler = RotatingFileHandler(
         "logs/app.log",
@@ -39,7 +43,7 @@ def setup_logging():
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     file_handler.setFormatter(file_formatter)
-    
+
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
 
@@ -58,14 +62,14 @@ def get_logger(name: str = None) -> logging.Logger:
     """
     if name is None:
         return logging.getLogger("ai_tele")
-    
+
     # 获取指定名称的logger
-    logger = logging.getLogger(name)
-    
+    logger_instance = logging.getLogger(name)
+
     # 确保logger级别设置正确
-    logger.setLevel(getattr(logging, settings.log_level.upper()))
-    
-    return logger
+    logger_instance.setLevel(getattr(logging, settings.log_level))
+
+    return logger_instance
 
 # 主应用logger（向后兼容）
 logger = get_logger("ai_tele")
