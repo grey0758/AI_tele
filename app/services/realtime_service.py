@@ -1,8 +1,6 @@
 # pylint: disable=too-many-lines
 """实时服务"""
-import base64
 import json
-import os
 import queue
 import random
 import signal
@@ -16,7 +14,6 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 import asyncio
 import gzip
-import requests
 import pyaudio
 import websockets
 from app.core.event_bus import ProductionEventBus
@@ -549,6 +546,7 @@ class RealtimeDialogClient:
             payload_size = int.from_bytes(payload[:4], "big", signed=False)
             payload_msg = payload[4:]
         elif message_type == SERVER_ERROR_RESPONSE:
+            result['message_type'] = 'SERVER_ERROR'
             code = int.from_bytes(payload[:4], "big", signed=False)
             result['code'] = code
             payload_size = int.from_bytes(payload[4:8], "big", signed=False)
@@ -1022,51 +1020,6 @@ class DialogSession:
 
 
 
-def train(appid, token, audio_path, spk_id):
-    """训练语音"""
-    host = "https://openspeech.bytedance.com"
-    url = host + "/api/v1/mega_tts/audio/upload"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer;" + token,
-        "Resource-Id": "volc.megatts.voiceclone",
-    }
-    encoded_data, audio_format = encode_audio_file(audio_path)
-    audios = [{"audio_bytes": encoded_data, "audio_format": audio_format}]
-    data = {"appid": appid, "speaker_id": spk_id, "audios": audios, "source": 2,"language": 0, "model_type": 1}
-    # 额外参数
-    extra_params = {}
-    if extra_params:
-        data["extra_params"] =  json.dumps(extra_params)
-    response = requests.post(url, json=data, headers=headers, timeout=10)
-    logger.info("status code = %s", response.status_code)
-    if response.status_code != 200:
-        raise Exception("train请求错误:" + response.text) # pylint: disable=broad-exception-raised
-    logger.info("headers = %s", response.headers)
-    logger.info("Response: %s", response.json())
-
-
-def get_status(appid, token, spk_id):
-    """获取语音状态"""
-    host = "https://openspeech.bytedance.com"
-    url = host + "/api/v1/mega_tts/status"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer;" + token,
-        "Resource-Id": "volc.megatts.voiceclone",
-    }
-    body = {"appid": appid, "speaker_id": spk_id}
-    response = requests.post(url, headers=headers, json=body, timeout=10)
-    logger.info("Status response: %s", response.json())
-
-
-def encode_audio_file(file_path):
-    """编码音频文件"""
-    with open(file_path, 'rb') as audio_file:
-        audio_data = audio_file.read()
-        encoded_data = str(base64.b64encode(audio_data), "utf-8")
-        audio_format = os.path.splitext(file_path)[1][1:]  # 获取文件扩展名作为音频格式
-        return encoded_data, audio_format
 
 
 class RealtimeService(BaseService):
