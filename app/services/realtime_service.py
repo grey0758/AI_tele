@@ -173,6 +173,36 @@ WS_CONNECT_CONFIG = {
         "X-Api-Connect-Id": str(uuid.uuid4()),
     }
 }
+START_SESSION_REQ = {
+    "asr": {
+        "extra": {
+            "end_smooth_window_ms": 2000,
+            "enable_custom_vad": True,
+        },
+    },
+    "tts": {
+        "speaker": "zh_female_xiaohe_jupiter_bigtts",
+        "audio_config": {
+            "channel": 1,
+            "format": "pcm",
+            "sample_rate": 24000
+        },
+    },
+    "dialog": {
+        "bot_name": "麦包",
+        "system_role": CHARACTER_MANIFEST,
+        "character_manifest": CHARACTER_MANIFEST,
+        "location": {
+          "city": "北京",
+        },
+        "extra": {
+            "strict_audit": False,
+            "audit_response": "支持客户自定义安全审核回复话术。",
+            "recv_timeout": 10,
+            "input_mod": "audio"
+        }
+    }
+}
 
 START_SESSION_REQ_1 = {
     "asr": {
@@ -191,7 +221,7 @@ START_SESSION_REQ_1 = {
     },
     "dialog": {
         "bot_name": "月月",
-        "system_role": "你使用活泼灵动的女声，性格开朗，热爱生活。",
+        "system_role": CHARACTER_MANIFEST,
         "character_manifest": CHARACTER_MANIFEST,
         "location": {
           "city": "北京",
@@ -205,8 +235,8 @@ START_SESSION_REQ_1 = {
         }
     }
 }
-
-START_SESSION_REQ = {
+#ICL_zh_female_aojiaonvyou_tob
+START_SESSION_REQ_2 = {
     "asr": {
         "extra": {
             "end_smooth_window_ms": 1000,
@@ -214,7 +244,7 @@ START_SESSION_REQ = {
         },
     },
     "tts": {
-        "speaker": "S_58MO6EIG1",
+        "speaker": "ICL_zh_female_wenrouwenya_tob",
         "audio_config": {
             "channel": 1,
             "format": "pcm",
@@ -390,7 +420,7 @@ class RealtimeDialogClient:
     async def say_hello(self) -> None:
         """发送Hello消息"""
         payload = {
-            "content": "你好老板，我是广州大麦的月月，我们在寻找联合运营的合作伙伴，共同投入共同分成的方式，问您目前有考虑联合运营的需求吗？ ",
+            "content": "你好老板，我是广州大麦的麦包，我们在寻找联合运营的合作伙伴，共同投入共同分成的方式，问您目前有考虑联合运营的需求吗？ ",
         }
         hello_request = bytearray(self.generate_header())
         hello_request.extend(int(300).to_bytes(4, 'big'))
@@ -774,7 +804,7 @@ class DialogSession:
                         logger.info("大模型回复最终结果: %s", self.chat_response_buffer)
                         # 添加agent对话记录
                         asyncio.create_task(self._add_dialog_entry("agent", self.chat_response_buffer))
-                        if "再见" in self.chat_response_buffer:
+                        if "再见" in self.chat_response_buffer or "拜拜" in self.chat_response_buffer:
                             logger.info("检测到agent回复包含'再见'，关闭麦克风录音流并挂断")
                             # 关闭麦克风录音流，防止用户再次回复
                             self._stop_recording()

@@ -56,7 +56,7 @@ class AicallService(BaseService):
             call_record = CallRecord(
                 **call_request.model_dump(),
                 status="to_be_dialed",
-                instance=6,
+                instance=3,
                 start_time=datetime.now(),
                 call_type="呼出",
             )
