@@ -263,7 +263,7 @@ class PhoneService(BaseService):
             # 构建拨号消息
             dial_message = SendMessage(
                 method="call",
-                instance=call_record.instance,
+                instance=6,
                 phone=call_record.phone_number,
                 CustomId=call_record.custom_id,
             )
