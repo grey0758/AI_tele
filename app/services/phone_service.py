@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from app.models.events import Event
 from app.models.events import EventType
 from app.core.event_bus import ProductionEventBus
-from app.models.call_record import DialogEntry, DialogRecord
+from app.models.call_record import DialogEntry, DialogRecord, CallRecord
 from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
@@ -62,6 +62,8 @@ class PhoneService(BaseService):
         self.call_id = None
         self.instance = None
         self.call_finished = False
+
+        self.device_info = None
 
         # 连接状态管理
         self._connection_event = threading.Event()
@@ -257,13 +259,13 @@ class PhoneService(BaseService):
                     "message": "拨号失败，请检查事件数据",
                 }
 
-            call_record = event.data
+            call_record : CallRecord = event.data
             self.call_id = call_record.call_id
 
             # 构建拨号消息
             dial_message = SendMessage(
                 method="call",
-                instance=6,
+                instance=self.device_info.devices[call_record.instance].instance,
                 phone=call_record.phone_number,
                 CustomId=call_record.custom_id,
             )
@@ -333,6 +335,8 @@ class PhoneService(BaseService):
                     Device(**device) for device in message_data.get("devices", [])
                 ],
             )
+
+            self.device_info = device_info
 
             await self.redis_service.set_device_info(device_info)
 
