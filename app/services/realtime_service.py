@@ -738,7 +738,6 @@ class DialogSession:
         self.is_session_finished = False
         self.is_user_querying = False
         self.is_sending_chat_tts_text = False
-        self.is_playing_audio = False
         self.audio_buffer = b''
         self.audio_buffer_lock = threading.Lock()
         self.chat_response_buffer = ''
@@ -1017,27 +1016,24 @@ class DialogSession:
         await self.client.say_hello()
         await self.say_hello_over_event.wait()
 
-        # 确保连接最终关闭
         try:
             # 启动输入监听线程
             input_queue: queue.Queue = queue.Queue()
             input_thread = threading.Thread(target=self.input_listener, args=(input_queue,), daemon=True)
             input_thread.start()
+            
             # 主循环：处理输入和上下文结束
-            while self.is_running:
+            while self.is_running and not self.is_session_finished:
                 try:
                     # 检查是否有输入（非阻塞）
                     input_str = input_queue.get_nowait()
                     if input_str is None:
-                        # 输入流关闭
                         logger.info("Input channel closed")
                         break
                     if input_str:
-                        # 发送输入内容
                         await self.client.chat_text_query(input_str)
                 except queue.Empty:
-                    # 无输入时短暂休眠
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
                 except Exception as e: # pylint: disable=broad-except
                     logger.error("Main loop error: %s", e)
                     break
@@ -1048,15 +1044,40 @@ class DialogSession:
         """在单独线程中监听标准输入"""
         logger.debug("开始监听用户输入")
         try:
-            while True:
-                # 读取标准输入（阻塞操作）
-                line = sys.stdin.readline()
-                if not line:
-                    # 输入流关闭
-                    input_queue.put(None)
-                    break
-                input_str = line.strip()
-                input_queue.put(input_str)
+            while self.is_running:
+                try:
+                    # 使用非阻塞方式读取标准输入
+                    import select
+                    if sys.platform == "win32":
+                        # Windows 平台使用 msvcrt
+                        import msvcrt
+                        if msvcrt.kbhit():
+                            line = sys.stdin.readline()
+                            if line:
+                                input_str = line.strip()
+                                if input_str:
+                                    input_queue.put(input_str)
+                            else:
+                                input_queue.put(None)
+                                break
+                        else:
+                            time.sleep(0.01)
+                    else:
+                        # Unix 平台使用 select
+                        if select.select([sys.stdin], [], [], 0.01)[0]:
+                            line = sys.stdin.readline()
+                            if line:
+                                input_str = line.strip()
+                                if input_str:
+                                    input_queue.put(input_str)
+                            else:
+                                input_queue.put(None)
+                                break
+                        else:
+                            time.sleep(0.01)
+                except Exception as e: # pylint: disable=broad-except
+                    logger.error("Input listener error: %s", e)
+                    time.sleep(0.01)
         except Exception as e: # pylint: disable=broad-except
             logger.error("Input listener error: %s", e)
             input_queue.put(None)
@@ -1082,10 +1103,6 @@ class DialogSession:
 
             logger.info("音频文件处理完成")
 
-    async def process_silence_audio(self) -> None:
-        """发送静音音频"""
-        silence_data = b'\x00' * 320
-        await self.client.task_request(silence_data)
 
     async def process_microphone_input(self) -> None:
         """处理麦克风输入"""
@@ -1121,8 +1138,7 @@ class DialogSession:
                 receive_task = asyncio.create_task(self.receive_loop())
 
                 try:
-                    while self.is_running:
-                        await asyncio.sleep(0.1)
+                    await asyncio.gather(text_task, receive_task, return_exceptions=True)
                 except KeyboardInterrupt:
                     logger.info("收到键盘中断信号，正在退出...")
                     self.stop()
@@ -1134,7 +1150,7 @@ class DialogSession:
                     receive_task = asyncio.create_task(self.receive_loop())
 
                     try:
-                        await receive_task
+                        await asyncio.gather(audio_task, receive_task, return_exceptions=True)
                     except KeyboardInterrupt:
                         logger.info("收到键盘中断信号，正在退出...")
                         self.stop()
@@ -1145,8 +1161,7 @@ class DialogSession:
                     receive_task = asyncio.create_task(self.receive_loop())
 
                     try:
-                        while self.is_running:
-                            await asyncio.sleep(0.1)
+                        await asyncio.gather(mic_task, receive_task, return_exceptions=True)
                     except KeyboardInterrupt:
                         logger.info("收到键盘中断信号，正在退出...")
                         self.stop()
@@ -1154,10 +1169,7 @@ class DialogSession:
                         receive_task.cancel()
 
             await self.client.finish_session()
-            while not self.is_session_finished:
-                await asyncio.sleep(0.1)
             await self.client.finish_connection()
-            await asyncio.sleep(0.1)
             await self.client.close()
             logger.info("对话完成，logid: %s, 模式: %s", self.client.logid, self.mod)
         except KeyboardInterrupt:
