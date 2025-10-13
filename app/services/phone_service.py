@@ -443,8 +443,6 @@ class PhoneService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.warning("取消定时器失败: %s", e)
 
-    # 移除自研轮询管理线程，改由调度器触发
-
     async def _handle_timer_timeout(self, terminate_type: str):
         try:
             await self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type})
