@@ -82,20 +82,18 @@ class AicallService(BaseService):
         try:
             # 测试模式：使用固定电话号码
             phone_number = "13189300627"
-            phone_id = "test_001"
             
-            logger.info("测试模式 - 开始自动拨打: ID=%s, 电话=%s", phone_id, phone_number)
+            logger.info("测试模式 - 开始自动拨打: 电话=%s", phone_number)
             
             # 创建拨打电话请求
             call_request = CallRequest(
                 phone_number=phone_number,
                 device_index=0,
                 tts_opening="你好老板，我是广州大麦的月月，我们在寻找联合运营的合作伙伴，共同投入共同分成的方式，问您目前有考虑联合运营的需求吗？",
-                custom_id=phone_id
+                custom_id= None
             )
-            
-            await asyncio.sleep(3)
-            
+
+            self.is_ended = True
 
             # 发起拨打
             await self.make_call(call_request)
