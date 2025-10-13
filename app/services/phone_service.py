@@ -445,17 +445,10 @@ class PhoneService(BaseService):
 
     # 移除自研轮询管理线程，改由调度器触发
 
-    def _handle_timer_timeout(self, terminate_type: str):
+    async def _handle_timer_timeout(self, terminate_type: str):
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type}),
-                    loop,
-                )
-            else:
-                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type}))
-        except RuntimeError:
-            logger.warning("无法发送超时事件，直接发送挂断消息")
+            await self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type})
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("无法发送超时事件，直接发送挂断消息: %s", e)
             hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance)
             self.send_message(hang_up_message)
