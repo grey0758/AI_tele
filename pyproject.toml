@@ -41,6 +41,8 @@ dependencies = [
     "pyaudio>=0.2.14",
     "aiomysql>=0.2.0",
     "types-pyaudio>=0.2.16.20250801",
+    "pandas>=2.3.3",
+    "openpyxl>=3.1.5",
 ]
 
 [project.optional-dependencies]
@@ -117,3 +119,8 @@ ignore_missing_imports = true
 
 [tool.pylint]
 max-line-length = 200
+disable = [
+    "broad-exception-caught",  # 禁用捕获通用异常的警告
+    "trailing-whitespace",     # 禁用尾随空格的警告
+]
+

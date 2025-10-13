@@ -1,17 +1,18 @@
 """Redis服务类"""
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
+import json
 from datetime import datetime
 import asyncio
 import redis
+from sqlalchemy import text
 from redis.exceptions import LockError, LockNotOwnedError
 from app.models.events import Event, EventType
 from app.utils.get_audio_devices import get_audio_devices
 from app.core.config import settings
 from app.core.event_bus import ProductionEventBus
 from app.models.call_record import CallRecord, DialogEntry, DialogRecord
-
-# 使用主应用的logger
+from app.db.database import Database
 from app.core.logger import get_logger
 from app.models.device_info import ConfigAudioDeviceInfo, DeviceInfo
 from app.services.base_service import BaseService
@@ -28,15 +29,18 @@ class RedisService(BaseService):
     LOCK_PREFIX = "lock:"
     CONFIG_INPUT_AUDIO_KEY = "config_input_audio"
     DIALOG_RECORD_PREFIX = "dialog_record:"
+    PHONE_QUEUE_PREFIX = "phone_queue:"
+    PHONE_QUEUE_LOCK = "phone_queue_lock"
 
-    def __init__(self, event_bus: Optional[ProductionEventBus] = None):
-        """初始化 Redis 服务（支持事件总线注入）"""
+    def __init__(self, event_bus: Optional[ProductionEventBus] = None, db: Optional[Database] = None):
+        """初始化 Redis 服务（支持事件总线和数据库注入）"""
         super().__init__(event_bus, "RedisService")
         self.redis_client: Optional[redis.Redis] = None
         self._connection_pool: Optional[redis.ConnectionPool] = None
         self._initialized = False
         self.event_bus = event_bus
         self.device_info: Optional[DeviceInfo] = None
+        self.db = db
 
         # 锁配置
         self.lock_timeout = 10  # 锁超时时间（秒）
@@ -670,3 +674,200 @@ class RedisService(BaseService):
         except Exception as e:
             logger.error("Failed to save config audio device info: %s", e)
             raise e
+
+    # ==================== 电话队列管理 ====================
+
+    async def get_phone_queue_batch(self, batch_size: int = 10) -> List[Dict[str, Any]]:
+        """
+        原子性地从数据库获取待打列表，保证多实例并发安全
+        
+        Args:
+            batch_size: 每次获取的电话数量，默认10条
+            
+        Returns:
+            List[Dict[str, Any]]: 电话列表，包含id和phone字段
+        """
+        self._ensure_connected()
+        
+        try:
+            async with self.acquire_lock(self.PHONE_QUEUE_LOCK, timeout=30):
+                # 1. 先从Redis缓存中获取
+                cached_phones = await self._get_cached_phones(batch_size)
+                
+                if len(cached_phones) >= batch_size:
+                    logger.info("从Redis缓存获取到 %d 条电话", len(cached_phones))
+                    return cached_phones[:batch_size]
+                
+                # 2. 缓存不足，从数据库补充
+                needed_count = batch_size - len(cached_phones)
+                db_phones = await self._fetch_phones_from_db(needed_count)
+                
+                if db_phones:
+                    # 3. 将新获取的电话添加到Redis缓存
+                    await self._add_phones_to_cache(db_phones)
+                    cached_phones.extend(db_phones)
+                    logger.info("从数据库补充了 %d 条电话", len(db_phones))
+                
+                # 4. 返回请求的数量
+                result = cached_phones[:batch_size]
+                logger.info("最终返回 %d 条电话", len(result))
+                return result
+                
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("获取电话队列失败: %s", e)
+            return []
+
+    async def _get_cached_phones(self, count: int) -> List[Dict[str, Any]]:
+        """从Redis缓存中获取电话"""
+        try:
+            # 使用Redis List的原子操作
+            phones = []
+            for _ in range(count):
+                phone_data = self.redis_client.lpop(self.PHONE_QUEUE_PREFIX + "pending")
+                if phone_data:
+                    phone_info = json.loads(phone_data)
+                    phones.append(phone_info)
+                else:
+                    break
+            
+            return phones
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("从Redis缓存获取电话失败: %s", e)
+            return []
+
+    async def _fetch_phones_from_db(self, count: int) -> List[Dict[str, Any]]:
+        """从数据库获取待打列表并标记为已拨打"""
+        try:
+            
+            if not self.db:
+                logger.error("数据库连接未注入")
+                return []
+            
+            async with self.db.get_session() as session:
+                select_sql = text("""
+                    SELECT id, phone 
+                    FROM phone_call_queue 
+                    WHERE is_called = FALSE 
+                    ORDER BY created_at ASC 
+                    LIMIT :count
+                    FOR UPDATE
+                """)
+                
+                result = await session.execute(select_sql, {"count": count})
+                rows = result.fetchall()
+                
+                if not rows:
+                    logger.info("数据库中没有更多待打列表")
+                    return []
+                
+                # 提取电话信息
+                phones = []
+                phone_ids = []
+                
+                for row in rows:
+                    phone_info = {
+                        "id": row[0],
+                        "phone": row[1]
+                    }
+                    phones.append(phone_info)
+                    phone_ids.append(row[0])
+                
+                # 批量更新为已拨打状态
+                if phone_ids:
+                    update_sql = text("""
+                        UPDATE phone_call_queue 
+                        SET is_called = TRUE, updated_at = CURRENT_TIMESTAMP 
+                        WHERE id IN :phone_ids
+                    """)
+                    await session.execute(update_sql, {"phone_ids": tuple(phone_ids)})
+                    await session.commit()
+                    
+                    logger.info("数据库更新了 %d 条电话为已拨打状态", len(phone_ids))
+                
+                return phones
+                    
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("从数据库获取电话失败: %s", e)
+            return []
+
+    async def _add_phones_to_cache(self, phones: List[Dict[str, Any]]):
+        """将电话添加到Redis缓存"""
+        try:
+            # 使用Redis Pipeline批量操作
+            pipeline = self.redis_client.pipeline()
+            
+            for phone in phones:
+                phone_data = json.dumps(phone, ensure_ascii=False)
+                pipeline.rpush(self.PHONE_QUEUE_PREFIX + "pending", phone_data)
+            
+            # 设置过期时间（24小时）
+            pipeline.expire(self.PHONE_QUEUE_PREFIX + "pending", 86400)
+            
+            pipeline.execute()
+            logger.info("成功添加 %d 条电话到Redis缓存", len(phones))
+            
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("添加电话到Redis缓存失败: %s", e)
+
+    async def get_queue_stats(self) -> Dict[str, Any]:
+        """获取队列统计信息"""
+        self._ensure_connected()
+        
+        cached_count = 0
+        try:
+            # Redis缓存中的待打数量
+            cached_count = self.redis_client.llen(self.PHONE_QUEUE_PREFIX + "pending")
+            
+            if not self.db:
+                logger.error("数据库连接未注入")
+                return {
+                    "total": 0,
+                    "uncalled": 0,
+                    "called": 0,
+                    "cached_pending": cached_count
+                }
+            
+            async with self.db.get_session() as session:
+                stats_query = text("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN is_called = FALSE THEN 1 ELSE 0 END) as uncalled,
+                        SUM(CASE WHEN is_called = TRUE THEN 1 ELSE 0 END) as called
+                    FROM phone_call_queue
+                """)
+                result = await session.execute(stats_query)
+                row = result.fetchone()
+                
+                stats = {
+                    "total": row[0] if row[0] else 0,
+                    "uncalled": row[1] if row[1] else 0,
+                    "called": row[2] if row[2] else 0,
+                    "cached_pending": cached_count
+                }
+                
+                logger.info("队列统计: 总计 %d, 未拨打 %d, 已拨打 %d, 缓存待打 %d", 
+                          stats['total'], stats['uncalled'], stats['called'], stats['cached_pending'])
+                return stats
+                
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("获取队列统计失败: %s", e)
+            return {
+                "total": 0,
+                "uncalled": 0,
+                "called": 0,
+                "cached_pending": cached_count
+            }
+
+    async def clear_phone_queue_cache(self) -> bool:
+        """清空电话队列缓存"""
+        self._ensure_connected()
+        
+        try:
+            async with self.acquire_lock(self.PHONE_QUEUE_LOCK):
+                result = self.redis_client.delete(self.PHONE_QUEUE_PREFIX + "pending")
+                logger.info("清空电话队列缓存: %s", "成功" if result else "缓存不存在")
+                return bool(result)
+                
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("清空电话队列缓存失败: %s", e)
+            return False

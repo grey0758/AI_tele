@@ -975,7 +975,7 @@ class DialogSession:
                             logger.info("检测到agent回复包含'再见'，关闭麦克风录音流并挂断")
                             # 关闭麦克风录音流，防止用户再次回复
                             self._stop_recording()
-                            asyncio.create_task(self.realtime_service.emit_event(EventType.PHONE_SERVICE_TERMINATECALL))
+                            asyncio.create_task(self.realtime_service.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "chat_ended"}))
 
                         self.chat_response_buffer = ''
             elif event == 350:  # TTSSentenceStart - 合成音频起始事件

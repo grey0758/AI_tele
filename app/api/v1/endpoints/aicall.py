@@ -66,3 +66,66 @@ async def get_device_config():
         input_devices=input_devices,
         output_devices=output_devices,
     ), message="设备音频配置查询成功")
+
+
+@router.post("/start_auto_calling")
+async def start_auto_calling(
+    aicall_service: AicallService = Depends(get_aicall_service)
+):
+    """
+    启动自动拨打模式
+    
+    从Redis队列中获取电话号码并自动拨打，每次电话结束后会自动拨打下一个
+    
+    Returns:
+        ResponseBuilder: 启动结果
+    """
+    logger.info("启动自动拨打模式请求")
+    
+    try:
+        success = await aicall_service.start_auto_calling()
+        
+        if success:
+            return ResponseBuilder.success(
+                data=None, 
+                message="自动拨打模式启动成功"
+            )
+        else:
+            return ResponseBuilder.error(
+                code=409,
+                message="自动拨打模式启动失败，可能有通话正在进行"
+            )
+            
+    except Exception as e:
+        logger.error("启动自动拨打模式失败: %s", e)
+        return ResponseBuilder.error(
+            code=500,
+            message=f"启动自动拨打模式失败: {str(e)}"
+        )
+
+
+@router.get("/queue_stats")
+async def get_queue_stats(
+    redis_service: RedisService = Depends(get_redis_service)
+):
+    """
+    获取电话队列统计信息
+    
+    Returns:
+        ResponseBuilder: 队列统计信息
+    """
+    logger.info("获取电话队列统计信息请求")
+    
+    try:
+        stats = await redis_service.get_queue_stats()
+        return ResponseBuilder.success(
+            data=stats,
+            message="获取队列统计信息成功"
+        )
+        
+    except Exception as e:
+        logger.error("获取队列统计信息失败: %s", e)
+        return ResponseBuilder.error(
+            code=500,
+            message=f"获取队列统计信息失败: {str(e)}"
+        )

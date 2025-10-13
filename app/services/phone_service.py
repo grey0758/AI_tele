@@ -14,6 +14,7 @@ from app.models.call_record import DialogEntry, DialogRecord, CallRecord
 from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
+from app.core.config import settings
 
 
 # 使用统一日志管理器
@@ -71,6 +72,10 @@ class PhoneService(BaseService):
 
         self.agent_hang_up = threading.Event()
         self.agent_hang_up.clear()
+        
+        # 定时器管理
+        self._timeout_task = None
+        self._call_duration_task = None
 
     async def initialize(self) -> bool:
         try:
@@ -91,7 +96,7 @@ class PhoneService(BaseService):
 
         await self._register_listener(EventType.PHONE_SERVICE_CALL_OUT, self.handle_call_out)
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self._call_finished)
-        await self._register_listener(EventType.PHONE_SERVICE_TERMINATECALL, self.hang_up, timeout=20.0)
+        await self._register_listener(EventType.PHONE_SERVICE_TERMINATECALL, self.hang_up, timeout=30.0)
 
     def _connect(self):
         """建立 WebSocket 连接"""
@@ -145,6 +150,16 @@ class PhoneService(BaseService):
                     uuid=data.get("uuid"),
                 )
 
+                # 取消定时器
+                if self._timeout_task:
+                    self._timeout_task.cancel()
+                    self._timeout_task = None
+                    logger.info("接听事件收到，取消定时器")
+
+                # 启动通话时长定时器（5分钟）
+                self._call_duration_task = asyncio.run(self._call_duration_timer())
+                logger.info("启动通话时长定时器（5分钟）")
+
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))
 
                 asyncio.run(self.redis_service.update_call_record_call_id(self.call_id, on_message.uuid))
@@ -185,6 +200,10 @@ class PhoneService(BaseService):
                 if self.agent_hang_up.is_set():
                     self.agent_hang_up.clear()
                     agent_hang_up = True
+                if self._call_duration_task:
+                    self._call_duration_task.cancel()
+                    self._call_duration_task = None
+                    logger.info("挂断事件收到，取消通话时长定时器")
                 asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已挂断"))
                 asyncio.run(self.redis_service.bind_dialog_record_to_call_record(call_id=self.call_id))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_id, "instance": self.instance, "agent_hang_up": agent_hang_up}))
@@ -261,11 +280,12 @@ class PhoneService(BaseService):
 
             call_record : CallRecord = event.data
             self.call_id = call_record.call_id
+            self.instance = self.device_info.devices[call_record.instance].instance
 
             # 构建拨号消息
             dial_message = SendMessage(
                 method="call",
-                instance=self.device_info.devices[call_record.instance].instance,
+                instance=self.instance,
                 phone=call_record.phone_number,
                 CustomId=call_record.custom_id,
             )
@@ -287,6 +307,9 @@ class PhoneService(BaseService):
             call_record.status = "already_dialed"
             call_record.start_time = datetime.now()
             await self.redis_service.update_call_record(call_record)
+
+            # 启动30秒定时器，如果超时则挂断电话
+            self._timeout_task = asyncio.create_task(self._call_timeout_timer())
 
             logger.info("拨号消息已准备: %s", dial_message)
 
@@ -312,10 +335,12 @@ class PhoneService(BaseService):
                 "message": f"拨号异常: {str(e)}",
             }
 
-    async def hang_up(self, _: Event = None) -> bool:
+    async def hang_up(self, event: Event = None) -> bool:
         """挂断电话"""
-        await asyncio.sleep(7)
-        hang_up_message = SendMessage(method="terminateCall", instance=self.instance)
+        
+        hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance)
+        if event.data.get("terminate_type") == "chat_ended":
+            await asyncio.sleep(7)
         self.agent_hang_up.set()
         self.send_message(hang_up_message)
         logger.info("Hanging up call on instance %s", self.instance)
@@ -355,6 +380,7 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
+        await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
     def stop(self):
         """停止 PhoneService"""
@@ -375,3 +401,27 @@ class PhoneService(BaseService):
 
         self._is_running = False
         logger.info("PhoneService 已停止")
+
+    async def _call_timeout_timer(self):
+        """30秒定时器，超时则挂断电话"""
+        try:
+            await asyncio.sleep(15)
+            if self._timeout_task:
+                logger.info("拨号30秒超时，自动挂断电话")
+                asyncio.create_task(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_timeout"}))
+                self._timeout_task = None
+        except asyncio.CancelledError:
+            logger.info("定时器被取消")
+            self._timeout_task = None
+
+    async def _call_duration_timer(self):
+        """5分钟通话时长定时器，超时则挂断电话"""
+        try:
+            await asyncio.sleep(300)  # 5分钟 = 300秒
+            if self._call_duration_task:
+                logger.info("通话时长5分钟超时，自动挂断电话")
+                asyncio.create_task(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_duration_timeout"}))
+                self._call_duration_task = None
+        except asyncio.CancelledError:
+            logger.info("通话时长定时器被取消")
+            self._call_duration_task = None

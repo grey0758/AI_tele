@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Debug mode")
     log_level: str = Field(default="INFO", description="Log level")
     computer_config_id: str = Field(default="", description="Computer config ID")
+    instance: int = Field(default=6, description="Instance")
 
     # SSH Tunnel Configuration
     ssh_host: str | None = Field(default=None, description="SSH server host")

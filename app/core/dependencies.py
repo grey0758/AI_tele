@@ -68,7 +68,7 @@ class EnhancedServiceContainer:
     async def _initialize_services(self):
         """初始化业务服务"""
         self._services["db_service"] = Database()
-        self._services["redis_service"] = RedisService(self._event_bus)
+        self._services["redis_service"] = RedisService(self._event_bus, self._services["db_service"])
         self._services["phone_service"] = PhoneService(self._event_bus, self._services["redis_service"])
         self._services["aicall_service"] = AicallService(self._event_bus, self._services["redis_service"])
         self._services["realtime_service"] = RealtimeService(self._event_bus, self._services["redis_service"])
