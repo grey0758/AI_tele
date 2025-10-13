@@ -80,25 +80,11 @@ class AicallService(BaseService):
     async def auto_call_next_phone(self, _: Event | None = None):
         """从Redis获取下一个电话号码并自动拨打"""
         try:
-            # 等待3秒后重试
-            await asyncio.sleep(3)
+            # 测试模式：使用固定电话号码
+            phone_number = "13189300627"
+            phone_id = "test_001"
             
-            # 从Redis获取一批电话号码
-            phones = await self.redis_service.get_phone_queue_batch(batch_size=1)
-            
-            if not phones:
-                logger.info("没有更多待打列表，自动拨打结束")
-                return
-            
-            phone_info = phones[0]
-            phone_number = phone_info.get("phone")
-            phone_id = phone_info.get("id")
-            
-            if not phone_number:
-                logger.warning("获取到的电话号码为空")
-                return
-            
-            logger.info("开始自动拨打: ID=%s, 电话=%s", phone_id, phone_number)
+            logger.info("测试模式 - 开始自动拨打: ID=%s, 电话=%s", phone_id, phone_number)
             
             # 创建拨打电话请求
             call_request = CallRequest(
@@ -108,6 +94,9 @@ class AicallService(BaseService):
                 custom_id=phone_id
             )
             
+            await asyncio.sleep(3)
+            
+
             # 发起拨打
             await self.make_call(call_request)
             
@@ -123,7 +112,7 @@ class AicallService(BaseService):
                 logger.warning("已有通话在进行，无法启动自动拨打")
                 return False
             
-            logger.info("启动自动拨打模式")
+            logger.info("启动自动拨打模式（测试模式）")
             await self.auto_call_next_phone()
             return True
             
