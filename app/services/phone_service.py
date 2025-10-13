@@ -8,6 +8,8 @@ from datetime import datetime
 import json
 import websocket
 from pydantic import BaseModel, Field
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
 from app.models.events import Event
 from app.models.events import EventType
 from app.core.event_bus import ProductionEventBus
@@ -74,10 +76,9 @@ class PhoneService(BaseService):
         self.agent_hang_up = threading.Event()
         self.agent_hang_up.clear()
         
-        # 定时器管理
-        self._timer_thread = None
-        self._timer_events = {}
-        self._timer_lock = threading.Lock()
+        # 定时任务调度
+        self._scheduler = AsyncIOScheduler()
+        self._scheduler_started = False
 
     async def initialize(self) -> bool:
         try:
@@ -307,7 +308,7 @@ class PhoneService(BaseService):
             await self.redis_service.update_call_record(call_record)
 
             # 启动15秒定时器，如果超时则挂断电话
-            self._start_timer("call_timeout", 30, "call_timeout")
+            self._start_timer("call_timeout", 15, "call_timeout")
 
             logger.info("拨号消息已准备: %s", dial_message)
 
@@ -397,74 +398,60 @@ class PhoneService(BaseService):
             if self.ws_thread.is_alive():
                 logger.warning("WebSocket 线程未能在5秒内正常退出")
 
-        # 清理定时器
-        with self._timer_lock:
-            self._timer_events.clear()
-        if hasattr(self, "_timer_thread") and self._timer_thread and self._timer_thread.is_alive():
-            self._timer_thread.join(timeout=2.0)
-            if self._timer_thread.is_alive():
-                logger.warning("定时器线程未能在2秒内正常退出")
+        # 清理定时任务
+        if hasattr(self, "_scheduler") and self._scheduler_started:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning("关闭调度器时出错: %s", e)
 
         self._is_running = False
         logger.info("PhoneService 已停止")
 
+    def _ensure_scheduler(self):
+        if not self._scheduler_started:
+            try:
+                self._scheduler.start()
+                self._scheduler_started = True
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error("启动调度器失败: %s", e)
+
     def _start_timer(self, timer_id: str, duration: int, terminate_type: str):
-        """启动定时器"""
-        with self._timer_lock:
-            if self._timer_thread is None or not self._timer_thread.is_alive():
-                self._timer_thread = threading.Thread(target=self._timer_manager, daemon=True)
-                self._timer_thread.start()
-            
-            self._timer_events[timer_id] = {
-                "duration": duration,
-                "terminate_type": terminate_type,
-                "start_time": time.time()
-            }
+        self._ensure_scheduler()
+        try:
+            run_date = datetime.fromtimestamp(time.time() + duration)
+            if self._scheduler.get_job(timer_id):
+                self._scheduler.remove_job(timer_id)
+            self._scheduler.add_job(
+                self._handle_timer_timeout,
+                trigger=DateTrigger(run_date=run_date),
+                id=timer_id,
+                args=[terminate_type],
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=5,
+            )
             logger.info("启动定时器: %s, 时长: %d秒", timer_id, duration)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("添加定时任务失败: %s", e)
 
     def _cancel_timer(self, timer_id: str):
-        """取消定时器"""
-        with self._timer_lock:
-            if timer_id in self._timer_events:
-                del self._timer_events[timer_id]
+        try:
+            if self._scheduler.get_job(timer_id):
+                self._scheduler.remove_job(timer_id)
                 logger.info("取消定时器: %s", timer_id)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("取消定时器失败: %s", e)
 
-    def _timer_manager(self):
-        """单一定时器管理线程"""
-        while True:
-            try:
-                current_time = time.time()
-                expired_timers = []
-                
-                with self._timer_lock:
-                    for timer_id, timer_info in self._timer_events.items():
-                        if current_time - timer_info["start_time"] >= timer_info["duration"]:
-                            expired_timers.append((timer_id, timer_info["terminate_type"]))
-                    
-                    for timer_id, _ in expired_timers:
-                        del self._timer_events[timer_id]
-                
-                for timer_id, terminate_type in expired_timers:
-                    logger.info("定时器 %s 超时，执行挂断操作", timer_id)
-                    self._handle_timer_timeout(terminate_type)
-                
-                if not self._timer_events:
-                    break
-                    
-                time.sleep(1)
-                
-            except Exception as e:
-                logger.error("定时器管理线程异常: %s", e)
-                break
+    # 移除自研轮询管理线程，改由调度器触发
 
     def _handle_timer_timeout(self, terminate_type: str):
-        """处理定时器超时"""
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type}),
-                    loop
+                    loop,
                 )
             else:
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type}))
