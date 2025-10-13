@@ -415,7 +415,21 @@ class PhoneService(BaseService):
             time.sleep(15)  # 15秒超时
             if not self._timeout_cancelled and self._timeout_task and self._timeout_task.is_alive():
                 logger.info("拨号15秒超时，自动挂断电话")
-                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_timeout"}))
+                # 使用线程安全的方式发送事件
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_timeout"}),
+                            loop
+                        )
+                    else:
+                        asyncio.run(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_timeout"}))
+                except RuntimeError:
+                    # 如果没有事件循环，直接发送消息
+                    logger.warning("无法发送超时事件，直接发送挂断消息")
+                    hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance)
+                    self.send_message(hang_up_message)
                 self._timeout_task = None
             else:
                 logger.info("定时器已被取消，不执行挂断操作")
@@ -429,7 +443,21 @@ class PhoneService(BaseService):
             time.sleep(300)  # 5分钟 = 300秒
             if not self._duration_cancelled and self._call_duration_task and self._call_duration_task.is_alive():
                 logger.info("通话时长5分钟超时，自动挂断电话")
-                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_duration_timeout"}))
+                # 使用线程安全的方式发送事件
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_duration_timeout"}),
+                            loop
+                        )
+                    else:
+                        asyncio.run(self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "call_duration_timeout"}))
+                except RuntimeError:
+                    # 如果没有事件循环，直接发送消息
+                    logger.warning("无法发送超时事件，直接发送挂断消息")
+                    hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance)
+                    self.send_message(hang_up_message)
                 self._call_duration_task = None
             else:
                 logger.info("通话时长定时器已被取消，不执行挂断操作")
