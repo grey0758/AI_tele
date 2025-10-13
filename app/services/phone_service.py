@@ -97,7 +97,7 @@ class PhoneService(BaseService):
         if not self.event_bus:
             return
 
-        await self._register_listener(EventType.PHONE_SERVICE_CALL_OUT, self.handle_call_out)
+        await self._register_listener(EventType.PHONE_SERVICE_CALL_OUT, self.handle_call_out, timeout=30.0)
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self._call_finished)
         await self._register_listener(EventType.PHONE_SERVICE_TERMINATECALL, self.hang_up, timeout=30.0)
 
