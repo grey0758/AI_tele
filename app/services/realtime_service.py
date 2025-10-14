@@ -735,18 +735,12 @@ class DialogSession:
         self.chat_response_lock = threading.Lock()
 
         self.audio_queue: queue.Queue = queue.Queue()
-        self.audio_device = AudioDeviceManager(
-            AudioConfig(**INPUT_AUDIO_CONFIG),
-            AudioConfig(**OUTPUT_AUDIO_CONFIG)
-        )
-        # 初始化音频队列和输出流
-        self.output_stream = self.audio_device.open_output_stream()
-        # 启动播放线程
+        self.audio_device = None
+        self.output_stream = None
+        # 延迟初始化音频设备，避免启动时阻塞
         self.is_recording = True
         self.is_playing = True
-        self.player_thread = threading.Thread(target=self._audio_player_thread)
-        self.player_thread.daemon = True
-        self.player_thread.start()
+        self.player_thread = None
 
         # 静音包保活相关
         self.is_silence_keepalive_running = False
@@ -791,6 +785,17 @@ class DialogSession:
     async def _pre_init_microphone(self):
         """预初始化麦克风"""
         try:
+            if self.audio_device is None:
+                self.audio_device = AudioDeviceManager(
+                    AudioConfig(**INPUT_AUDIO_CONFIG),
+                    AudioConfig(**OUTPUT_AUDIO_CONFIG)
+                )
+                self.output_stream = self.audio_device.open_output_stream()
+                # 启动播放线程
+                self.player_thread = threading.Thread(target=self._audio_player_thread)
+                self.player_thread.daemon = True
+                self.player_thread.start()
+            
             loop = asyncio.get_event_loop()
             self.input_stream = await loop.run_in_executor(None, self.audio_device.open_input_stream)
         except Exception as e: # pylint: disable=broad-except
@@ -840,6 +845,10 @@ class DialogSession:
                     logger.info("麦克风录音流已停止")
                 except Exception as e: # pylint: disable=broad-except
                     logger.error("停止麦克风录音流时出错: %s", e)
+            
+            # 清理音频设备
+            if self.audio_device:
+                self.audio_device.cleanup()
 
         except Exception as e: # pylint: disable=broad-except
             logger.error("关闭录音流时发生错误: %s", e)
@@ -1071,7 +1080,8 @@ class DialogSession:
         except Exception as e: # pylint: disable=broad-except
             logger.error("会话错误: %s", e)
         finally:
-            self.audio_device.cleanup()
+            if self.audio_device:
+                self.audio_device.cleanup()
 
 
 
