@@ -953,7 +953,7 @@ class DialogSession:
             is_user_querying=self.is_user_querying,
             start=True,
             end=False,
-            content="这是查询到外部数据之前的安抚话术。",
+            content="老板您稍等一下我查询一下数据",
         )
         await self.client.chat_tts_text(
             is_user_querying=self.is_user_querying,
