@@ -748,10 +748,45 @@ class DialogSession:
         self.player_thread.daemon = True
         self.player_thread.start()
 
+        # 静音包保活相关
+        self.is_silence_keepalive_running = False
+        self.silence_keepalive_task = None
+
         # 预先初始化麦克风流，减少后续阻塞
         self.input_stream = None
         # 异步预初始化麦克风
         asyncio.create_task(self._pre_init_microphone())
+
+    def _generate_silence_audio(self) -> bytes:
+        """生成静音音频数据"""
+        chunk_size = INPUT_AUDIO_CONFIG["chunk"]
+        silence_data = b'\x00' * chunk_size * 2  # 16位音频，每个采样点2字节
+        return silence_data
+
+    async def _silence_keepalive_task(self):
+        """静音包保活任务 - 每5秒发送一个静音包"""
+        try:
+            self.is_silence_keepalive_running = True
+            logger.info("启动静音包保活任务")
+            
+            while self.is_silence_keepalive_running and not self.is_session_finished:
+                await asyncio.sleep(5)  # 等待5秒
+                
+                if self.is_silence_keepalive_running and not self.is_session_finished:
+                    try:
+                        silence_data = self._generate_silence_audio()
+                        await self.client.task_request(silence_data)
+                        logger.debug("发送静音包保活")
+                    except Exception as e: # pylint: disable=broad-except
+                        logger.error("发送静音包失败: %s", e)
+                        
+        except asyncio.CancelledError:
+            logger.debug("静音包保活任务已取消")
+        except Exception as e: # pylint: disable=broad-except
+            logger.error("静音包保活任务错误: %s", e)
+        finally:
+            self.is_silence_keepalive_running = False
+            logger.info("静音包保活任务结束")
 
     async def _pre_init_microphone(self):
         """预初始化麦克风"""
@@ -954,6 +989,11 @@ class DialogSession:
         self.is_recording = False
         self.is_playing = False
         self.is_running = False
+        
+        # 停止静音包保活任务
+        self.is_silence_keepalive_running = False
+        if self.silence_keepalive_task and not self.silence_keepalive_task.done():
+            self.silence_keepalive_task.cancel()
 
     async def receive_loop(self):
         """接收服务器响应"""
@@ -1005,16 +1045,21 @@ class DialogSession:
         try:
             await self.client.connect()
 
+            # 启动静音包保活任务
+            self.silence_keepalive_task = asyncio.create_task(self._silence_keepalive_task())
+
             mic_task = asyncio.create_task(self.process_microphone_input())
             receive_task = asyncio.create_task(self.receive_loop())
 
             try:
-                await asyncio.gather(mic_task, receive_task, return_exceptions=True)
+                await asyncio.gather(mic_task, receive_task, self.silence_keepalive_task, return_exceptions=True)
             except KeyboardInterrupt:
                 logger.info("收到键盘中断信号，正在退出...")
                 self.stop()
                 mic_task.cancel()
                 receive_task.cancel()
+                if self.silence_keepalive_task:
+                    self.silence_keepalive_task.cancel()
 
             await self.client.finish_session()
             await self.client.finish_connection()
