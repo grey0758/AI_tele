@@ -810,10 +810,19 @@ class DialogSession:
                 self.player_thread.daemon = True
                 self.player_thread.start()
             
+            # 添加超时机制，避免PyAudio初始化阻塞
             loop = asyncio.get_event_loop()
-            self.input_stream = await loop.run_in_executor(None, self.audio_device.open_input_stream)
+            try:
+                self.input_stream = await asyncio.wait_for(
+                    loop.run_in_executor(None, self.audio_device.open_input_stream),
+                    timeout=10.0  # 10秒超时
+                )
+            except asyncio.TimeoutError:
+                logger.error("麦克风初始化超时，可能被系统阻塞")
+                self.input_stream = None
         except Exception as e: # pylint: disable=broad-except
             logger.error("预初始化麦克风失败: %s", e)
+            self.input_stream = None
 
     def _audio_player_thread(self):
         """音频播放线程"""
@@ -1044,29 +1053,55 @@ class DialogSession:
         """处理麦克风输入"""
         # await self.client.say_hello()
 
-        # 等待麦克风预初始化完成
-        while self.input_stream is None:
+        # 等待麦克风预初始化完成，添加超时机制
+        timeout_count = 0
+        max_timeout = 1000  # 最多等待10秒
+        while self.input_stream is None and timeout_count < max_timeout:
             await asyncio.sleep(0.01)
+            timeout_count += 1
+        
+        if self.input_stream is None:
+            logger.error("麦克风初始化超时，跳过音频输入处理")
+            return
 
         # 启动流
-        self.input_stream.start_stream()
-        logger.info("麦克风已就绪，请开始说话")
+        try:
+            self.input_stream.start_stream()
+            logger.info("麦克风已就绪，请开始说话")
+        except Exception as e:
+            logger.error("启动麦克风流失败: %s", e)
+            return
 
         while self.is_recording:
             try:
-                # 使用更小的chunk和更短的超时时间
-                audio_data = self.input_stream.read(INPUT_AUDIO_CONFIG["chunk"], exception_on_overflow=False)
-                await self.client.task_request(audio_data)
+                # 使用更小的chunk和更短的超时时间，添加异常处理
+                try:
+                    audio_data = self.input_stream.read(INPUT_AUDIO_CONFIG["chunk"], exception_on_overflow=False)
+                    if audio_data:
+                        await self.client.task_request(audio_data)
+                except Exception as read_error:
+                    logger.warning("读取麦克风数据出错: %s", read_error)
+                    await asyncio.sleep(0.1)  # 出错时等待更长时间
+                    continue
+                
                 # 减少等待时间，提高响应性
                 await asyncio.sleep(0.005)
             except Exception as e: # pylint: disable=broad-except
-                logger.error("读取麦克风数据出错: %s", e)
+                logger.error("处理麦克风输入出错: %s", e)
                 await asyncio.sleep(0.01)
 
     async def start(self) -> None:
         """启动对话会话"""
         try:
-            await self.client.connect()
+            # 添加WebSocket连接超时
+            try:
+                await asyncio.wait_for(self.client.connect(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.error("WebSocket连接超时")
+                return
+            except Exception as e:
+                logger.error("WebSocket连接失败: %s", e)
+                return
 
             # 启动静音包保活任务
             self.silence_keepalive_task = asyncio.create_task(self._silence_keepalive_task())
@@ -1075,7 +1110,18 @@ class DialogSession:
             receive_task = asyncio.create_task(self.receive_loop())
 
             try:
-                await asyncio.gather(mic_task, receive_task, self.silence_keepalive_task, return_exceptions=True)
+                # 使用超时机制，避免无限等待
+                await asyncio.wait_for(
+                    asyncio.gather(mic_task, receive_task, self.silence_keepalive_task, return_exceptions=True),
+                    timeout=3600.0  # 1小时超时
+                )
+            except asyncio.TimeoutError:
+                logger.warning("会话超时，正在关闭...")
+                self.stop()
+                mic_task.cancel()
+                receive_task.cancel()
+                if self.silence_keepalive_task:
+                    self.silence_keepalive_task.cancel()
             except KeyboardInterrupt:
                 logger.info("收到键盘中断信号，正在退出...")
                 self.stop()
@@ -1084,9 +1130,16 @@ class DialogSession:
                 if self.silence_keepalive_task:
                     self.silence_keepalive_task.cancel()
 
-            await self.client.finish_session()
-            await self.client.finish_connection()
-            await self.client.close()
+            # 安全关闭连接
+            try:
+                await asyncio.wait_for(self.client.finish_session(), timeout=5.0)
+                await asyncio.wait_for(self.client.finish_connection(), timeout=5.0)
+                await asyncio.wait_for(self.client.close(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("关闭连接超时")
+            except Exception as e:
+                logger.error("关闭连接时出错: %s", e)
+                
             logger.info("对话完成，logid: %s, 模式: %s", self.client.logid, self.mod)
         except KeyboardInterrupt:
             logger.info("收到键盘中断信号，正在退出...")
@@ -1096,10 +1149,6 @@ class DialogSession:
         finally:
             if self.audio_device:
                 self.audio_device.cleanup()
-
-
-
-
 
 class RealtimeService(BaseService):
     """实时服务"""

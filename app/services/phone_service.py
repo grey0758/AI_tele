@@ -370,9 +370,6 @@ class PhoneService(BaseService):
         if self.call_record:
             self.call_record.dialog_record.append(event.data.get("dialog_entry"))
             logger.debug("Dialog entry added to call_record for call_id: %s", self.call_id)
-            
-            # 直接连接Redis保存对话记录
-            self._save_dialog_to_redis(event.data.get("dialog_entry"))
         else:
             logger.warning("Call record not found for call_id: %s", self.call_id)
 
