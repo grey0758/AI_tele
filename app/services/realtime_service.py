@@ -369,12 +369,15 @@ class AudioDeviceManager:
     def __init__(self, input_config: AudioConfig, output_config: AudioConfig):
         self.input_config = input_config
         self.output_config = output_config
-        self.pyaudio = pyaudio.PyAudio()
+        self.pyaudio = None
         self.input_stream: Optional[pyaudio.Stream] = None
         self.output_stream: Optional[pyaudio.Stream] = None
 
     def open_input_stream(self) -> pyaudio.Stream:
         """打开音频输入流"""
+        if self.pyaudio is None:
+            self.pyaudio = pyaudio.PyAudio()
+        
         self.input_stream = self.pyaudio.open(
             format=self.input_config.bit_size,
             channels=self.input_config.channels,
@@ -388,6 +391,9 @@ class AudioDeviceManager:
 
     def open_output_stream(self) -> pyaudio.Stream:
         """打开音频输出流"""
+        if self.pyaudio is None:
+            self.pyaudio = pyaudio.PyAudio()
+            
         self.output_stream = self.pyaudio.open(
             format=self.output_config.bit_size,
             channels=self.output_config.channels,
@@ -401,9 +407,17 @@ class AudioDeviceManager:
         """清理音频设备资源"""
         for stream in [self.input_stream, self.output_stream]:
             if stream:
-                stream.stop_stream()
-                stream.close()
-        self.pyaudio.terminate()
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception as e:
+                    logger.warning("关闭音频流时出错: %s", e)
+        
+        if self.pyaudio:
+            try:
+                self.pyaudio.terminate()
+            except Exception as e:
+                logger.warning("终止PyAudio时出错: %s", e)
 
 
 class RealtimeDialogClient:
@@ -736,18 +750,12 @@ class DialogSession:
         self.chat_response_lock = threading.Lock()
 
         self.audio_queue: queue.Queue = queue.Queue()
-        self.audio_device = AudioDeviceManager(
-            AudioConfig(**INPUT_AUDIO_CONFIG),
-            AudioConfig(**OUTPUT_AUDIO_CONFIG)
-        )
-        # 初始化音频队列和输出流
-        self.output_stream = self.audio_device.open_output_stream()
-        # 启动播放线程
+        self.audio_device = None
+        self.output_stream = None
+        # 延迟初始化音频设备，避免启动时阻塞
         self.is_recording = True
         self.is_playing = True
-        self.player_thread = threading.Thread(target=self._audio_player_thread)
-        self.player_thread.daemon = True
-        self.player_thread.start()
+        self.player_thread = None
 
         # 静音包保活相关
         self.is_silence_keepalive_running = False
@@ -792,6 +800,17 @@ class DialogSession:
     async def _pre_init_microphone(self):
         """预初始化麦克风"""
         try:
+            if self.audio_device is None:
+                self.audio_device = AudioDeviceManager(
+                    AudioConfig(**INPUT_AUDIO_CONFIG),
+                    AudioConfig(**OUTPUT_AUDIO_CONFIG)
+                )
+                self.output_stream = self.audio_device.open_output_stream()
+                # 启动播放线程
+                self.player_thread = threading.Thread(target=self._audio_player_thread)
+                self.player_thread.daemon = True
+                self.player_thread.start()
+            
             loop = asyncio.get_event_loop()
             self.input_stream = await loop.run_in_executor(None, self.audio_device.open_input_stream)
         except Exception as e: # pylint: disable=broad-except
@@ -803,7 +822,7 @@ class DialogSession:
             try:
                 # 从队列获取音频数据，使用更短的超时时间
                 audio_data = self.audio_queue.get(timeout=0.1)
-                if audio_data is not None:
+                if audio_data is not None and self.output_stream is not None:
                     self.output_stream.write(audio_data)
             except queue.Empty:
                 # 队列为空时短暂等待
@@ -991,6 +1010,10 @@ class DialogSession:
         self.is_playing = False
         self.is_running = False
         
+        # 停止播放线程
+        if self.player_thread and self.player_thread.is_alive():
+            self.player_thread.join(timeout=1.0)
+        
         # 停止静音包保活任务
         self.is_silence_keepalive_running = False
         if self.silence_keepalive_task and not self.silence_keepalive_task.done():
@@ -1072,11 +1095,8 @@ class DialogSession:
         except Exception as e: # pylint: disable=broad-except
             logger.error("会话错误: %s", e)
         finally:
-            self.audio_device.cleanup()
-
-
-
-
+            if self.audio_device:
+                self.audio_device.cleanup()
 
 class RealtimeService(BaseService):
     """实时服务"""
@@ -1085,7 +1105,6 @@ class RealtimeService(BaseService):
         self,
         event_bus: Optional[ProductionEventBus] = None,
         redis_service: Optional[RedisService] = None,
-
     ):
         super().__init__(event_bus=event_bus, service_name="RealtimeService")
         self.ws_config = WS_CONNECT_CONFIG
