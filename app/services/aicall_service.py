@@ -97,10 +97,29 @@ class AicallService(BaseService):
             
         try:
             async with self.db.get_session() as session:
+                # 先检查数据库中的总记录数和可用记录数
+                total_stmt = select(PhoneCallQueue)
+                total_result = await session.execute(total_stmt)
+                total_records = total_result.scalars().all()
+                
+                available_stmt = select(PhoneCallQueue).where(PhoneCallQueue.is_called == False)
+                available_result = await session.execute(available_stmt)
+                available_records = available_result.scalars().all()
+                
+                logger.info("数据库状态检查 - 总记录数: %d, 可用记录数: %d", len(total_records), len(available_records))
+                
+                if len(total_records) == 0:
+                    logger.warning("数据库中没有任何电话号码记录")
+                    return None
+                
+                if len(available_records) == 0:
+                    logger.warning("所有电话号码都已被拨打")
+                    return None
+                
                 # 使用SELECT ... FOR UPDATE锁定行，确保原子性
                 stmt = (
                     select(PhoneCallQueue)
-                    .where(not PhoneCallQueue.is_called)
+                    .where(PhoneCallQueue.is_called == False)
                     .order_by(PhoneCallQueue.created_at.asc())
                     .limit(1)
                     .with_for_update(skip_locked=True)  # 跳过已被锁定的行
