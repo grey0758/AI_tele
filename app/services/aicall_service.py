@@ -4,8 +4,8 @@
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy import select
-import asyncio
 from app.models.events import Event
+import asyncio
 from app.models.events import EventType
 from app.schemas.aicall import CallRequest
 from app.core.logger import get_logger
@@ -14,6 +14,7 @@ from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
 from app.services.redis_service import RedisService
 from app.db.database import Database
+from app.models.phone_call_queue import PhoneCallQueue
 
 
 logger = get_logger(__name__)
