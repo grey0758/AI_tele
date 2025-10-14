@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 import json
 import websocket
+import redis
 from pydantic import BaseModel, Field
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -78,6 +79,10 @@ class PhoneService(BaseService):
         # 定时任务调度
         self._scheduler = AsyncIOScheduler()
         self._scheduler_started = False
+        
+        # Redis连接管理
+        self.redis_client = None
+        self._redis_connected = False
 
     async def initialize(self) -> bool:
         try:
@@ -365,8 +370,47 @@ class PhoneService(BaseService):
         if self.call_record:
             self.call_record.dialog_record.append(event.data.get("dialog_entry"))
             logger.debug("Dialog entry added to call_record for call_id: %s", self.call_id)
+            
+            # 直接连接Redis保存对话记录
+            self._save_dialog_to_redis(event.data.get("dialog_entry"))
         else:
             logger.warning("Call record not found for call_id: %s", self.call_id)
+
+    def _save_dialog_to_redis(self, dialog_entry):
+        """连接Redis，保存对话记录，然后关闭连接"""
+        redis_client = None
+        try:
+            # 连接Redis
+            redis_client = redis.Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                username=settings.redis_username,
+                password=settings.redis_password,
+                db=settings.redis_db,
+                decode_responses=True,
+                socket_connect_timeout=5,
+                socket_timeout=5
+            )
+            
+            # 测试连接
+            redis_client.ping()
+            
+            # 保存对话记录
+            dialog_key = f"dialog_record:{self.call_id}"
+            redis_client.lpush(dialog_key, json.dumps(dialog_entry, ensure_ascii=False))
+            
+            logger.info("对话记录已保存到Redis: call_id=%s", self.call_id)
+            
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("保存对话记录到Redis失败: %s", e)
+        finally:
+            # 关闭Redis连接
+            if redis_client:
+                try:
+                    redis_client.close()
+                    logger.debug("Redis连接已关闭")
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.error("关闭Redis连接时出错: %s", e)
 
     async def _call_finished(self, _: Event = None):
         """通话结束"""

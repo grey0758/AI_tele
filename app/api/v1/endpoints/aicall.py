@@ -2,14 +2,12 @@
 from fastapi import APIRouter, Depends
 from app.schemas.base import ResponseBuilder
 from app.utils.get_audio_devices import get_audio_devices
-from app.models.device_info import ConfigAudioDeviceInfo
-from app.core.dependencies import get_aicall_service, get_redis_service
+from app.core.dependencies import get_aicall_service
 from app.schemas.aicall import (
     CallRequest,
     DeviceConfigListResponse,
 )
 from app.services.aicall_service import AicallService
-from app.services.redis_service import RedisService
 from app.core.logger import get_logger
 
 
@@ -36,22 +34,22 @@ async def make_call(
     return ResponseBuilder.success(data=None, message="Call completed successfully")
 
 
-@router.post("/set_device_config")
-async def set_device_config(
-    config: ConfigAudioDeviceInfo,
-    redis_service: RedisService = Depends(get_redis_service),
-):
-    """
-    设置设备音频输入输出配置
+# @router.post("/set_device_config")
+# async def set_device_config(
+#     config: ConfigAudioDeviceInfo,
+#     redis_service: RedisService = Depends(get_redis_service),
+# ):
+#     """
+#     设置设备音频输入输出配置
 
-    Args:
-        config: 音频设备配置信息
+#     Args:
+#         config: 音频设备配置信息
 
-    Returns:
-        DeviceConfigResponse: 配置结果
-    """
-    await redis_service.set_device_info_input_audio_and_output_audio(config)
-    return ResponseBuilder.success(data=None, message="设备音频配置设置成功")
+#     Returns:
+#         DeviceConfigResponse: 配置结果
+#     """
+#     await redis_service.set_device_info_input_audio_and_output_audio(config)
+#     return ResponseBuilder.success(data=None, message="设备音频配置设置成功")
 
 
 # 当前设备音频设备列表查询
@@ -101,31 +99,4 @@ async def start_auto_calling(
         return ResponseBuilder.error(
             code=500,
             message=f"启动自动拨打模式失败: {str(e)}"
-        )
-
-
-@router.get("/queue_stats")
-async def get_queue_stats(
-    redis_service: RedisService = Depends(get_redis_service)
-):
-    """
-    获取电话队列统计信息
-    
-    Returns:
-        ResponseBuilder: 队列统计信息
-    """
-    logger.info("获取电话队列统计信息请求")
-    
-    try:
-        stats = await redis_service.get_queue_stats()
-        return ResponseBuilder.success(
-            data=stats,
-            message="获取队列统计信息成功"
-        )
-        
-    except Exception as e:
-        logger.error("获取队列统计信息失败: %s", e)
-        return ResponseBuilder.error(
-            code=500,
-            message=f"获取队列统计信息失败: {str(e)}"
         )

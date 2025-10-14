@@ -114,7 +114,7 @@ class RedisService(BaseService):
                 return {"status": "unhealthy", "error": "Not initialized"}
 
             # 测试连接
-            self.redis_client.ping()
+            # self.redis_client.ping()
 
             # 获取连接信息
             info = await self.redis_client.info()
