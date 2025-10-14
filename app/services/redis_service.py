@@ -52,7 +52,15 @@ class RedisService(BaseService):
                 redis_url = redis_url.replace("redis://", "rediss://")
             
             # 创建异步 Redis 连接
-            self.redis_client = await redis.from_url(redis_url, decode_responses=True)
+            ssl_params = {}
+            if settings.redis_ssl or is_upstash:
+                # 对于Upstash或其他需要SSL的Redis，禁用证书验证以避免证书问题
+                ssl_params = {
+                    "ssl_cert_reqs": None,  # 禁用SSL证书验证
+                    "ssl_check_hostname": False
+                }
+            
+            self.redis_client = await redis.from_url(redis_url, decode_responses=True, **ssl_params)
             
             # 测试连接
             assert self.redis_client is not None
