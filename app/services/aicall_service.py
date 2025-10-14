@@ -82,7 +82,7 @@ class AicallService(BaseService):
         try:
             await asyncio.sleep(3)  # 等待3秒
             
-            phones = await self.redis_service.get_phone_queue_batch(batch_size=1)
+            phones = await self.redis_service.get_phone_queue_batch()
             
             if not phones:
                 logger.info("没有更多待打列表，自动拨打结束")

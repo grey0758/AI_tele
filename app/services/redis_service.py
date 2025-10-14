@@ -677,12 +677,12 @@ class RedisService(BaseService):
 
     # ==================== 电话队列管理 ====================
 
-    async def get_phone_queue_batch(self, batch_size: int = 10, test_mode: bool = False) -> List[Dict[str, Any]]:
+    async def get_phone_queue_batch(self, test_mode: bool = False) -> List[Dict[str, Any]]:
         """
         原子性地从数据库获取待打列表，保证多实例并发安全
+        每次只返回一个号码，但确保Redis缓存中保持100个号码
         
         Args:
-            batch_size: 每次获取的电话数量，默认10条
             test_mode: 测试模式，为True时仅返回13189300627
             
         Returns:
@@ -696,49 +696,35 @@ class RedisService(BaseService):
         
         try:
             async with self.acquire_lock(self.PHONE_QUEUE_LOCK, timeout=30):
-                # 1. 先从Redis缓存中获取
-                cached_phones = await self._get_cached_phones(batch_size)
+                # 1. 检查Redis缓存中的数量
+                cached_count = self.redis_client.llen(self.PHONE_QUEUE_PREFIX + "pending")
                 
-                if len(cached_phones) >= batch_size:
-                    logger.info("从Redis缓存获取到 %d 条电话", len(cached_phones))
-                    return cached_phones[:batch_size]
+                # 2. 如果缓存不足100个，从数据库补充到100个
+                if cached_count < 100:
+                    needed_count = 100 - cached_count
+                    logger.info("Redis缓存中只有 %d 个号码，需要从数据库补充 %d 个", cached_count, needed_count)
+                    
+                    db_phones = await self._fetch_phones_from_db(needed_count)
+                    if db_phones:
+                        await self._add_phones_to_cache(db_phones)
+                        logger.info("从数据库补充了 %d 条电话到Redis缓存", len(db_phones))
+                    else:
+                        logger.warning("数据库中没有更多待打列表")
                 
-                # 2. 缓存不足，从数据库补充
-                needed_count = batch_size - len(cached_phones)
-                db_phones = await self._fetch_phones_from_db(needed_count)
-                
-                if db_phones:
-                    # 3. 将新获取的电话添加到Redis缓存
-                    await self._add_phones_to_cache(db_phones)
-                    cached_phones.extend(db_phones)
-                    logger.info("从数据库补充了 %d 条电话", len(db_phones))
-                
-                # 4. 返回请求的数量
-                result = cached_phones[:batch_size]
-                logger.info("最终返回 %d 条电话", len(result))
-                return result
+                # 3. 从Redis缓存中获取一个号码
+                phone_data = self.redis_client.lpop(self.PHONE_QUEUE_PREFIX + "pending")
+                if phone_data:
+                    phone_info = json.loads(phone_data)
+                    logger.info("从Redis缓存获取到1个号码: %s", phone_info.get("phone"))
+                    return [phone_info]
+                else:
+                    logger.warning("Redis缓存中没有号码")
+                    return []
                 
         except Exception as e:  # pylint: disable=broad-except
             logger.error("获取电话队列失败: %s", e)
             return []
 
-    async def _get_cached_phones(self, count: int) -> List[Dict[str, Any]]:
-        """从Redis缓存中获取电话"""
-        try:
-            # 使用Redis List的原子操作
-            phones = []
-            for _ in range(count):
-                phone_data = self.redis_client.lpop(self.PHONE_QUEUE_PREFIX + "pending")
-                if phone_data:
-                    phone_info = json.loads(phone_data)
-                    phones.append(phone_info)
-                else:
-                    break
-            
-            return phones
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("从Redis缓存获取电话失败: %s", e)
-            return []
 
     async def _fetch_phones_from_db(self, count: int) -> List[Dict[str, Any]]:
         """从数据库获取待打列表并标记为已拨打"""
