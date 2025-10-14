@@ -13,7 +13,7 @@ from apscheduler.triggers.date import DateTrigger
 from app.models.events import Event
 from app.models.events import EventType
 from app.core.event_bus import ProductionEventBus
-from app.models.call_record import DialogEntry
+from app.models.call_record import CallRecord, DialogEntry
 from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
@@ -63,7 +63,7 @@ class PhoneService(BaseService):
 
         self.call_id = None
         self.instance = None
-        self.call_record  = None
+        self.call_record: CallRecord | None = None
         self.call_finished = False
 
         self.device_info: DeviceInfo | None = None
@@ -163,8 +163,8 @@ class PhoneService(BaseService):
 
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))
 
-                self.call_id = on_message.uuid
-                self.instance = on_message.instance
+                self.call_record.call_id = on_message.uuid
+                self.call_record.instance = on_message.instance
 
                 tts_opening = self.call_record.tts_opening if self.call_record else ""
 
@@ -193,7 +193,7 @@ class PhoneService(BaseService):
                     agent_hang_up = True
                 self._cancel_timer("call_duration")
                 logger.info("挂断事件收到，取消通话时长定时器")
-                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_id, "instance": self.instance, "agent_hang_up": agent_hang_up}))
+                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_record.call_id, "instance": self.call_record.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)
 
@@ -267,15 +267,27 @@ class PhoneService(BaseService):
 
             assert event.data is not None, "Event data is None"
             assert self.device_info is not None and self.device_info.devices is not None, "Device info is None or devices is None"
+            
+            # 从事件数据中获取call_record
+            call_record = event.data
+            if call_record is None:
+                logger.error("Call record in event data is None")
+                return {
+                    "success": False,
+                    "phone_number": None,
+                    "error": "Call record is None",
+                    "message": "拨号失败，通话记录为空",
+                }
+            
+            self.call_record = call_record
             assert self.call_record is not None, "Call record is None"
-            self.call_record = event.data
-            self.call_id = self.call_record.call_id
-            self.instance = self.device_info.devices[self.call_record.instance].instance
+            assert self.device_info is not None and self.device_info.devices is not None, "Device info is None or devices is None"
+            self.call_record.instance = self.device_info.devices[self.call_record.instance].instance
 
             # 构建拨号消息
             dial_message = SendMessage(
                 method="call",
-                instance=self.instance,
+                instance=self.call_record.instance,
                 phone=self.call_record.phone_number,
                 CustomId=self.call_record.custom_id,
             )
@@ -287,7 +299,7 @@ class PhoneService(BaseService):
                 logger.error("WebSocket not connected")
                 return {
                     "success": False,
-                    "phone_number": self.call_record.phone_number,
+                    "phone_number": self.call_record.phone_number if self.call_record else None,
                     "error": "WebSocket未连接",
                     "message": "拨号失败，请检查连接状态",
                 }
@@ -364,6 +376,7 @@ class PhoneService(BaseService):
     def add_dialog_entry(self, event: Event):
         """添加对话记录"""
         if self.call_record:
+            assert event.data is not None and event.data.get("dialog_entry") is not None
             self.call_record.dialog_record.append(event.data.get("dialog_entry"))
             logger.debug("Dialog entry added to call_record for call_id: %s", self.call_id)
         else:
@@ -372,9 +385,9 @@ class PhoneService(BaseService):
     async def _call_finished(self, _: Event | None = None):
         """通话结束"""
         self.call_finished = True
-        self.call_id = None
         self.instance = None
         await self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record)
+        self.call_record = None
         await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
