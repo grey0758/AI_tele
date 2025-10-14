@@ -239,10 +239,14 @@ async def check_services_health() -> Dict[str, Any]:
     for name, service in service_container.get_all_services().items():
         try:
             if hasattr(service, "health_check"):
-                service_health = await service.health_check()
+                # 添加超时控制，避免健康检查阻塞
+                service_health = await asyncio.wait_for(service.health_check(), timeout=5.0)
                 health_status["services"][name] = service_health
             else:
                 health_status["services"][name] = {"status": "unknown"}
+        except asyncio.TimeoutError:
+            health_status["services"][name] = {"status": "timeout", "error": "Health check timeout"}
+            health_status["status"] = "degraded"
         except Exception as e: # pylint: disable=broad-except
             health_status["services"][name] = {"status": "unhealthy", "error": str(e)}
             health_status["status"] = "degraded"
