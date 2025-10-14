@@ -75,6 +75,7 @@ class RedisService(BaseService):
     async def register_event_listeners(self):
         """注册事件监听器"""
         await self._register_listener(EventType.REDIS_CREATE_CALL_RECORD, self.create_call_record)
+        await self._register_listener(EventType.REDIS_SET_DEVICE_INFO, self.handle_set_device_info)
 
     async def shutdown(self):
         """异步关闭 Redis 连接"""
@@ -138,6 +139,31 @@ class RedisService(BaseService):
             return True
         except Exception as e:  # pylint: disable=broad-except
             logger.error("Failed to save device info: %s", e)
+            return False
+
+    async def handle_set_device_info(self, event: Event) -> bool:
+        """
+        处理设置设备信息事件
+
+        Args:
+            event: 包含设备信息的事件
+
+        Returns:
+            bool: 操作是否成功
+        """
+        try:
+            device_info = event.data
+            if isinstance(device_info, dict):
+                # 如果传入的是字典，转换为DeviceInfo对象
+                device_info = DeviceInfo(**device_info)
+            elif not isinstance(device_info, DeviceInfo):
+                logger.error("Invalid device_info type: %s", type(device_info))
+                return False
+            
+            result = await self.set_device_info(device_info)
+            return result
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Failed to handle set device info event: %s", e)
             return False
 
     # ==================== 电话记录管理 ====================

@@ -141,7 +141,7 @@ class PhoneService(BaseService):
 
             if notify_type == "OnConnect":
                 # 处理连接成功消息
-                self.handle_on_connect_message(data)
+                asyncio.run(self.handle_on_connect_message(data))
                 logger.info("OnConnect 消息已处理")
 
             elif notify_type == "OnAnswer":
@@ -331,7 +331,7 @@ class PhoneService(BaseService):
         logger.info("Hanging up call on instance %s", self.instance)
         return True
 
-    def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
+    async def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
         """处理连接消息"""
         try:
             logger.info("Processing OnConnect message")
@@ -348,8 +348,8 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
-            assert self.redis_service is not None, "Redis service is None"
-            asyncio.run(self.redis_service.set_device_info(device_info))
+            # 通过事件驱动方式设置设备信息，避免事件循环冲突
+            await self.emit_event(EventType.REDIS_SET_DEVICE_INFO, device_info)
 
             return {
                 "success": True,
