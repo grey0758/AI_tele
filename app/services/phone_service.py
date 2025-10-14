@@ -33,9 +33,7 @@ class SendMessage(BaseModel):
     method: Annotated[str, Field(description="方法")]
     instance: Annotated[int, Field(description="设备实例")]
     phone: Annotated[str | None, Field(default=None, description="电话号码")]
-    CustomId: Annotated[
-        str | None, Field(default=None, description="自定义ID", exclude=True)
-    ]
+    CustomId: Annotated[str | None, Field(default=None, description="自定义ID", exclude=True)]
 
 
 class OnMessageType(BaseModel):
@@ -68,7 +66,7 @@ class PhoneService(BaseService):
         self.call_record  = None
         self.call_finished = False
 
-        self.device_info = None
+        self.device_info: DeviceInfo | None = None
 
         # 连接状态管理
         self._connection_event = threading.Event()
@@ -267,6 +265,9 @@ class PhoneService(BaseService):
                     "message": "拨号失败，请检查事件数据",
                 }
 
+            assert event.data is not None, "Event data is None"
+            assert self.device_info is not None and self.device_info.devices is not None, "Device info is None or devices is None"
+            assert self.call_record is not None, "Call record is None"
             self.call_record = event.data
             self.call_id = self.call_record.call_id
             self.instance = self.device_info.devices[self.call_record.instance].instance
@@ -310,22 +311,19 @@ class PhoneService(BaseService):
             }
 
         except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error dialing phone %s: %s", self.call_record.phone_number, e)
-            self.call_record.status = "无法拨打"
-            self.call_record.end_time = datetime.now()
-            self.call_record.duration = 0
-            self.call_record.notes = str(e)
+            logger.error("Error dialing phone %s: %s", self.call_record.phone_number if self.call_record else None, e)
             return {
                 "success": False,
-                "phone_number": self.call_record.phone_number,
+                "phone_number": self.call_record.phone_number if self.call_record else None,
                 "error": str(e),
                 "message": f"拨号异常: {str(e)}",
             }
 
-    async def hang_up(self, event: Event = None) -> bool:
+    async def hang_up(self, event: Event | None = None) -> bool:
         """挂断电话"""
         
-        hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance)
+        hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance, phone=None, CustomId=None)
+        assert event is not None and event.data is not None
         if event.data.get("terminate_type") == "chat_ended":
             await asyncio.sleep(7)
         self.agent_hang_up.set()
@@ -350,6 +348,7 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
+            assert self.redis_service is not None, "Redis service is None"
             asyncio.run(self.redis_service.set_device_info(device_info))
 
             return {
@@ -370,7 +369,7 @@ class PhoneService(BaseService):
         else:
             logger.warning("Call record not found for call_id: %s", self.call_id)
 
-    async def _call_finished(self, _: Event = None):
+    async def _call_finished(self, _: Event | None = None):
         """通话结束"""
         self.call_finished = True
         self.call_id = None
@@ -446,5 +445,5 @@ class PhoneService(BaseService):
             await self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type})
         except Exception as e:  # pylint: disable=broad-except
             logger.warning("无法发送超时事件，直接发送挂断消息: %s", e)
-            hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance)
+            hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance, phone=None, CustomId=None)
             self.send_message(hang_up_message)

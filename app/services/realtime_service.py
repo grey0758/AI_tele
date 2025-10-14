@@ -2,7 +2,6 @@
 """实时服务"""
 import json
 import queue
-import random
 import threading
 import time
 import uuid
@@ -241,7 +240,7 @@ WS_CONNECT_CONFIG = {
         "X-Api-Connect-Id": str(uuid.uuid4()),
     }
 }
-START_SESSION_REQ = {
+START_SESSION_REQ: Dict[str, Any] = {
     "asr": {
         "extra": {
             "end_smooth_window_ms": 1000,
@@ -369,9 +368,9 @@ class AudioDeviceManager:
     def __init__(self, input_config: AudioConfig, output_config: AudioConfig):
         self.input_config = input_config
         self.output_config = output_config
-        self.pyaudio = None
-        self.input_stream: Optional[pyaudio.Stream] = None
-        self.output_stream: Optional[pyaudio.Stream] = None
+        self.pyaudio: pyaudio.PyAudio | None = None
+        self.input_stream: pyaudio.Stream | None = None
+        self.output_stream: pyaudio.Stream | None = None
 
     def open_input_stream(self) -> pyaudio.Stream:
         """打开音频输入流"""
@@ -430,7 +429,7 @@ class RealtimeDialogClient:
         self.output_audio_format = output_audio_format
         self.mod = mod
         self.recv_timeout = recv_timeout
-        self.ws = None
+        self.ws: websockets.ClientConnection | None = None
 
     async def connect(self) -> None:
         """建立WebSocket连接"""
@@ -440,21 +439,11 @@ class RealtimeDialogClient:
             additional_headers=self.config['headers'],
             ping_interval=None
         )
-        # 获取logid
-        logger.debug("WebSocket对象类型: %s", type(self.ws))
-        logger.debug("WebSocket对象属性: %s", [attr for attr in dir(self.ws) if not attr.startswith('_')])
 
-        self.logid = ""
-
-        # 方式2: response.headers
-        if not self.logid and hasattr(self.ws, 'response'):
-            logger.debug("找到response属性")
-            if hasattr(self.ws.response, 'headers'):
-                logger.debug("response.headers内容: %s", self.ws.response.headers)
-                self.logid = self.ws.response.headers.get("X-Tt-Logid", "")
-                logger.debug("从response.headers获取到的logid: %s", self.logid)
-
+        assert self.ws.response is not None, "WebSocket response is None"
+        self.logid = self.ws.response.headers.get("X-Tt-Logid", "")
         logger.info("WebSocket连接成功，logid: %s", self.logid)
+        logger.debug("从response.headers获取到的logid: %s", self.logid)
 
         # StartConnection request
         start_connection_request = bytearray(self.generate_header())
@@ -468,20 +457,14 @@ class RealtimeDialogClient:
         logger.info("StartConnection 成功")
 
         # 扩大这个参数，可以在一段时间内保持静默，主要用于text模式，参数范围[10,120]
-        START_SESSION_REQ["dialog"]["extra"]["recv_timeout"] = self.recv_timeout
+        request_params: Dict[str, Any] = START_SESSION_REQ.copy()
+        request_params["dialog"]["extra"]["recv_timeout"] = self.recv_timeout
         # 这个参数，在text或者audio_file模式，可以在一段时间内保持静默
-        START_SESSION_REQ["dialog"]["extra"]["input_mod"] = self.mod
+        request_params["dialog"]["extra"]["input_mod"] = self.mod
         # StartSession request
         if self.output_audio_format == "pcm_s16le":
-            START_SESSION_REQ["tts"]["audio_config"]["format"] = "pcm_s16le"
-        request_params = START_SESSION_REQ
+            request_params["tts"]["audio_config"]["format"] = "pcm_s16le"
 
-        # 打印StartSession请求的所有参数
-        logger.debug("发送StartSession请求，事件ID: 100")
-        logger.debug("StartSession请求参数:")
-        logger.debug("ASR配置: %s", json.dumps(request_params.get("asr", {}), ensure_ascii=False, indent=2))
-        logger.debug("TTS配置: %s", json.dumps(request_params.get("tts", {}), ensure_ascii=False, indent=2))
-        logger.debug("Dialog配置: %s", json.dumps(request_params.get("dialog", {}), ensure_ascii=False, indent=2))
 
         payload_bytes = str.encode(json.dumps(request_params))
         payload_bytes = gzip.compress(payload_bytes)
@@ -494,7 +477,6 @@ class RealtimeDialogClient:
         await self.ws.send(start_session_request)
         response = await self.ws.recv()
 
-        # 解析并打印StartSession响应
         response_data = self.parse_response(response)
         logger.info("StartSession响应: %s", json.dumps(response_data, ensure_ascii=False, indent=2))
         logger.info("StartSession 成功，开始对话")
@@ -512,6 +494,7 @@ class RealtimeDialogClient:
         hello_request.extend(str.encode(self.session_id))
         hello_request.extend((len(payload_bytes)).to_bytes(4, 'big'))
         hello_request.extend(payload_bytes)
+        assert self.ws is not None
         await self.ws.send(hello_request)
 
     async def chat_text_query(self, content: str) -> None:
@@ -527,6 +510,7 @@ class RealtimeDialogClient:
         chat_text_query_request.extend(str.encode(self.session_id))
         chat_text_query_request.extend((len(payload_bytes)).to_bytes(4, 'big'))
         chat_text_query_request.extend(payload_bytes)
+        assert self.ws is not None
         await self.ws.send(chat_text_query_request)
 
     async def chat_tts_text(self, is_user_querying: bool, start: bool, end: bool, content: str) -> None:
@@ -548,6 +532,7 @@ class RealtimeDialogClient:
         chat_tts_text_request.extend(str.encode(self.session_id))
         chat_tts_text_request.extend((len(payload_bytes)).to_bytes(4, 'big'))
         chat_tts_text_request.extend(payload_bytes)
+        assert self.ws is not None
         await self.ws.send(chat_tts_text_request)
 
     async def chat_rag_text(self, is_user_querying: bool, external_rag: str) -> None:
@@ -567,6 +552,7 @@ class RealtimeDialogClient:
         chat_rag_text_request.extend(str.encode(self.session_id))
         chat_rag_text_request.extend((len(payload_bytes)).to_bytes(4, 'big'))
         chat_rag_text_request.extend(payload_bytes)
+        assert self.ws is not None
         await self.ws.send(chat_rag_text_request)
 
     async def task_request(self, audio: bytes) -> None:
@@ -580,11 +566,13 @@ class RealtimeDialogClient:
         payload_bytes = gzip.compress(audio)
         task_request.extend((len(payload_bytes)).to_bytes(4, 'big'))
         task_request.extend(payload_bytes)
+        assert self.ws is not None
         await self.ws.send(task_request)
 
     async def receive_server_response(self) -> Dict[str, Any]:
         """接收服务器响应"""
         try:
+            assert self.ws is not None
             response = await self.ws.recv()
             data = self.parse_response(response)
             return data
@@ -759,7 +747,7 @@ class DialogSession:
 
         # 静音包保活相关
         self.is_silence_keepalive_running = False
-        self.silence_keepalive_task = None
+        self.silence_keepalive_task: asyncio.Task | None = None
 
         # 预先初始化麦克风流，减少后续阻塞
         self.input_stream = None
@@ -768,7 +756,8 @@ class DialogSession:
 
     def _generate_silence_audio(self) -> bytes:
         """生成静音音频数据"""
-        chunk_size = INPUT_AUDIO_CONFIG["chunk"]
+        chunk_value = INPUT_AUDIO_CONFIG.get("chunk", 1600)
+        chunk_size = int(chunk_value) if isinstance(chunk_value, (int, str)) else 1600
         silence_data = b'\x00' * chunk_size * 2  # 16位音频，每个采样点2字节
         return silence_data
 
@@ -806,13 +795,12 @@ class DialogSession:
                     AudioConfig(**OUTPUT_AUDIO_CONFIG)
                 )
                 self.output_stream = self.audio_device.open_output_stream()
+                
                 # 启动播放线程
-                self.player_thread = threading.Thread(target=self._audio_player_thread)
-                self.player_thread.daemon = True
+                self.player_thread = threading.Thread(target=self._audio_player_thread, daemon=True)
                 self.player_thread.start()
-            
-            loop = asyncio.get_event_loop()
-            self.input_stream = await loop.run_in_executor(None, self.audio_device.open_input_stream)
+                self.input_stream = self.audio_device.open_input_stream()
+
         except Exception as e: # pylint: disable=broad-except
             logger.error("预初始化麦克风失败: %s", e)
 
@@ -914,6 +902,7 @@ class DialogSession:
                             logger.info("检测到agent回复包含'再见'，关闭麦克风录音流并挂断")
                             # 关闭麦克风录音流，防止用户再次回复
                             self._stop_recording()
+                            assert self.realtime_service is not None and self.realtime_service.event_bus is not None
                             asyncio.create_task(self.realtime_service.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": "chat_ended"}))
 
                         self.chat_response_buffer = ''
@@ -973,11 +962,12 @@ class DialogSession:
                 self.is_sending_chat_tts_text = False
 
             if event == 459:
-                self.is_user_querying = False
-                if random.randint(0, 100000) % 100 == 0:
-                    self.is_sending_chat_tts_text = True
-                    asyncio.create_task(self.trigger_chat_tts_text())
-                    asyncio.create_task(self.trigger_chat_rag_text())
+                pass
+                # self.is_user_querying = False
+                # if random.randint(0, 100000) % 100 == 0:
+                #     self.is_sending_chat_tts_text = True
+                #     asyncio.create_task(self.trigger_chat_tts_text())
+                #     asyncio.create_task(self.trigger_chat_rag_text())
         elif response['message_type'] == 'SERVER_ERROR':
             logger.error("服务器错误: %s", response['payload_msg'])
             raise Exception("服务器错误") # pylint: disable=broad-exception-raised
@@ -1055,7 +1045,6 @@ class DialogSession:
 
         while self.is_recording:
             try:
-                # 使用更小的chunk和更短的超时时间
                 audio_data = self.input_stream.read(INPUT_AUDIO_CONFIG["chunk"], exception_on_overflow=False)
                 await self.client.task_request(audio_data)
                 # 减少等待时间，提高响应性
@@ -1076,14 +1065,14 @@ class DialogSession:
             receive_task = asyncio.create_task(self.receive_loop())
 
             try:
-                await asyncio.gather(mic_task, receive_task, self.silence_keepalive_task, return_exceptions=True)
+                tasks = [mic_task, receive_task]
+                await asyncio.gather(*tasks, return_exceptions=True)
             except KeyboardInterrupt:
                 logger.info("收到键盘中断信号，正在退出...")
                 self.stop()
                 mic_task.cancel()
                 receive_task.cancel()
-                if self.silence_keepalive_task:
-                    self.silence_keepalive_task.cancel()
+                self.silence_keepalive_task.cancel()
 
             await self.client.finish_session()
             await self.client.finish_connection()
@@ -1110,7 +1099,7 @@ class RealtimeService(BaseService):
         self.ws_config = WS_CONNECT_CONFIG
         self.redis_service = redis_service
         self.is_running = False
-        self.current_session: str | None = None
+        self.current_session: DialogSession | None = None
         self.call_id: str | None = None
 
     async def initialize(self) -> bool:
@@ -1151,13 +1140,14 @@ class RealtimeService(BaseService):
         """启动实时对话的便捷方法"""
         await self.main(audio_format, recv_timeout)
 
-    async def handle_realtime_start(self, event: Event = None) -> bool:
+    async def handle_realtime_start(self, event: Event | None = None) -> bool:
         """处理实时服务启动事件"""
         try:
             if self.is_running:
                 logger.warning("RealtimeService is already running")
                 return False
 
+            assert event is not None and event.data is not None
             on_message : OnMessageType = event.data
 
             self.call_id = on_message.uuid
@@ -1190,7 +1180,7 @@ class RealtimeService(BaseService):
             self.stats["total_failed"] += 1
             return False
 
-    async def handle_realtime_stop(self, _: Event = None) -> bool:
+    async def handle_realtime_stop(self, _: Event | None = None) -> bool:
         """处理实时服务停止事件"""
         try:
             if not self.is_running:
@@ -1219,7 +1209,7 @@ class RealtimeService(BaseService):
             self.stats["total_failed"] += 1
             return False
 
-    async def health_check(self) -> bool:
+    async def health_check(self) -> Dict[str, Any]:
         """健康检查"""
         base_health = await super().health_check()
         return {
