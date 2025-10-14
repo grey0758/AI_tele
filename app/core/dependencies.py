@@ -93,26 +93,50 @@ class EnhancedServiceContainer:
                 logger.info("Event listeners registered for %s", name)
 
     async def shutdown(self):
-        """关闭所有服务"""
+        """关闭所有服务 - 优化关闭顺序"""
         if not self._initialized:
             return
 
         logger.info("Shutting down service container...")
 
         try:
-            # 1. 关闭业务服务
+            # 1. 首先停止事件总线，防止新的事件被处理
+            if self._event_bus and self._event_bus.running:
+                logger.info("Stopping EventBus...")
+                await self._event_bus.stop()
+                logger.info("EventBus shutdown completed")
+
+            # 2. 关闭业务服务（按依赖顺序）
+            # 先关闭依赖数据库的服务
+            service_shutdown_order = [
+                "aicall_service",  # 依赖数据库，先关闭
+                "realtime_service",  # 依赖Redis，其次关闭
+                "phone_service",  # 依赖WebSocket，再次关闭
+                "redis_service",  # Redis服务
+                "db_service",  # 数据库服务最后关闭
+            ]
+            
+            # 按顺序关闭服务
+            for service_name in service_shutdown_order:
+                if service_name in self._services:
+                    service = self._services[service_name]
+                    if hasattr(service, "shutdown"):
+                        try:
+                            logger.info("Shutting down %s...", service_name)
+                            await service.shutdown()
+                            logger.info("Service %s shutdown completed", service_name)
+                        except Exception as e: # pylint: disable=broad-except
+                            logger.error("Error shutting down %s | error=%s", service_name, str(e))
+
+            # 3. 关闭剩余的服务
             for name, service in self._services.items():
-                if hasattr(service, "shutdown"):
+                if name not in service_shutdown_order and hasattr(service, "shutdown"):
                     try:
+                        logger.info("Shutting down %s...", name)
                         await service.shutdown()
                         logger.info("Service %s shutdown completed", name)
                     except Exception as e: # pylint: disable=broad-except
                         logger.error("Error shutting down %s | error=%s", name, str(e))
-
-            # 2. 关闭事件总线
-            if self._event_bus and self._event_bus.running:
-                await self._event_bus.stop()
-                logger.info("EventBus shutdown completed")
 
         except Exception as e: # pylint: disable=broad-except
             logger.error("Error during shutdown | error=%s", str(e))

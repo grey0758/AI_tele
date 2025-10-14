@@ -461,5 +461,3 @@ class PhoneService(BaseService):
             await self.emit_event(EventType.PHONE_SERVICE_TERMINATECALL, {"terminate_type": terminate_type})
         except Exception as e:  # pylint: disable=broad-except
             logger.warning("无法发送超时事件，直接发送挂断消息: %s", e)
-            hang_up_message = SendMessage(method="terminateCall", instance=self.instance if self.instance else settings.instance, phone=None, CustomId=None)
-            self.send_message(hang_up_message)
