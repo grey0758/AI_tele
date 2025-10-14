@@ -205,6 +205,7 @@ class PhoneService(BaseService):
                 logger.info("挂断事件收到，取消通话时长定时器")
                 asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已挂断"))
                 asyncio.run(self.redis_service.bind_dialog_record_to_call_record(call_id=self.call_id))
+                asyncio.run(self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_id, "instance": self.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)
@@ -379,7 +380,6 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
-        await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL, with_result=True)
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
     def stop(self):
