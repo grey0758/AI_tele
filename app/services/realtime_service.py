@@ -716,7 +716,6 @@ class DialogSession:
 
     def __init__(self, ws_config: Dict[str, Any], output_audio_format: str = "pcm", recv_timeout: int = 10, realtime_service: Optional['RealtimeService'] = None):
         self.recv_timeout = recv_timeout
-        self.say_hello_over_event = asyncio.Event()
         self.mod = "audio"
 
         self.session_id = str(uuid.uuid4())
@@ -971,10 +970,6 @@ class DialogSession:
                     logger.info("TTS播放结束")
                     self.is_session_finished = True
                     break
-                else:
-                    if not self.say_hello_over_event.is_set():
-                        logger.info("开场白播放结束")
-                        self.say_hello_over_event.set()
 
         except asyncio.CancelledError:
             logger.debug("接收任务已取消")
@@ -990,7 +985,6 @@ class DialogSession:
     async def process_microphone_input(self) -> None:
         """处理麦克风输入"""
         await self.client.say_hello()
-        await self.say_hello_over_event.wait()
 
         # 等待麦克风预初始化完成
         while self.input_stream is None:
