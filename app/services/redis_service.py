@@ -677,17 +677,22 @@ class RedisService(BaseService):
 
     # ==================== 电话队列管理 ====================
 
-    async def get_phone_queue_batch(self, batch_size: int = 10) -> List[Dict[str, Any]]:
+    async def get_phone_queue_batch(self, batch_size: int = 10, test_mode: bool = True) -> List[Dict[str, Any]]:
         """
         原子性地从数据库获取待打列表，保证多实例并发安全
         
         Args:
             batch_size: 每次获取的电话数量，默认10条
+            test_mode: 测试模式，为True时仅返回13189300627
             
         Returns:
             List[Dict[str, Any]]: 电话列表，包含id和phone字段
         """
         self._ensure_connected()
+        
+        if test_mode:
+            logger.info("测试模式：仅返回13189300627")
+            return [{"id": "test_001", "phone": "13189300627"}]
         
         try:
             async with self.acquire_lock(self.PHONE_QUEUE_LOCK, timeout=30):
