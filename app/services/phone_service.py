@@ -13,7 +13,7 @@ from apscheduler.triggers.date import DateTrigger
 from app.models.events import Event
 from app.models.events import EventType
 from app.core.event_bus import ProductionEventBus
-from app.models.call_record import DialogEntry, DialogRecord, CallRecord
+from app.models.call_record import DialogEntry
 from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
@@ -65,6 +65,7 @@ class PhoneService(BaseService):
 
         self.call_id = None
         self.instance = None
+        self.call_record = None
         self.call_finished = False
 
         self.device_info = None
@@ -100,6 +101,7 @@ class PhoneService(BaseService):
         await self._register_listener(EventType.PHONE_SERVICE_CALL_OUT, self.handle_call_out, timeout=30.0)
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self._call_finished)
         await self._register_listener(EventType.PHONE_SERVICE_TERMINATECALL, self.hang_up, timeout=30.0)
+        await self._register_listener(EventType.PHONE_SERVICE_ADD_DIALOG_ENTRY, self.add_dialog_entry)
 
     def _connect(self):
         """建立 WebSocket 连接"""
@@ -163,29 +165,19 @@ class PhoneService(BaseService):
 
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))
 
-                asyncio.run(self.redis_service.update_call_record_call_id(self.call_id, on_message.uuid))
-
                 self.call_id = on_message.uuid
                 self.instance = on_message.instance
 
-                asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已接听"))
+                tts_opening = self.call_record.tts_opening if self.call_record else ""
 
-                record = asyncio.run(self.redis_service.get_call_record(self.call_id))
-
-                tts_opening = record.tts_opening if record else ""
-
-                dialog_record = DialogRecord(
-                    call_id=self.call_id,
-                    dialog_record=[
+                if self.call_record:
+                    self.call_record.dialog_record = [
                         DialogEntry(
                             speaker="agent",
                             content=tts_opening,
                             timestamp=datetime.now().isoformat(),
                         )
                     ]
-                )
-
-                asyncio.run(self.redis_service.create_dialog_record(dialog_record))
 
             elif notify_type == "OnCallOut":
                 # 处理呼出事件
@@ -203,8 +195,6 @@ class PhoneService(BaseService):
                     agent_hang_up = True
                 self._cancel_timer("call_duration")
                 logger.info("挂断事件收到，取消通话时长定时器")
-                asyncio.run(self.redis_service.update_call_record_status(call_id=self.call_id, status="已挂断"))
-                asyncio.run(self.redis_service.bind_dialog_record_to_call_record(call_id=self.call_id))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_id, "instance": self.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)
@@ -277,35 +267,34 @@ class PhoneService(BaseService):
                     "message": "拨号失败，请检查事件数据",
                 }
 
-            call_record : CallRecord = event.data
-            self.call_id = call_record.call_id
-            self.instance = self.device_info.devices[call_record.instance].instance
+            self.call_record = self.call_record
+            self.call_id = self.call_record.call_id
+            self.instance = self.device_info.devices[self.call_record.instance].instance
 
             # 构建拨号消息
             dial_message = SendMessage(
                 method="call",
                 instance=self.instance,
-                phone=call_record.phone_number,
-                CustomId=call_record.custom_id,
+                phone=self.call_record.phone_number,
+                CustomId=self.call_record.custom_id,
             )
 
-            logger.info("Dialing %s with instance %s", call_record.phone_number, call_record.instance,)
+            logger.info("Dialing %s with instance %s", self.call_record.phone_number, self.call_record.instance,)
 
             # 检查WebSocket连接状态
             if not self.ws:
                 logger.error("WebSocket not connected")
                 return {
                     "success": False,
-                    "phone_number": call_record.phone_number,
+                    "phone_number": self.call_record.phone_number,
                     "error": "WebSocket未连接",
                     "message": "拨号失败，请检查连接状态",
                 }
 
             self.send_message(dial_message)
 
-            call_record.status = "already_dialed"
-            call_record.start_time = datetime.now()
-            await self.redis_service.update_call_record(call_record)
+            self.call_record.status = "already_dialed"
+            self.call_record.start_time = datetime.now()
 
             # 启动15秒定时器，如果超时则挂断电话
             self._start_timer("call_timeout", 15, "call_timeout")
@@ -314,22 +303,21 @@ class PhoneService(BaseService):
 
             return {
                 "success": True,
-                "phone_number": call_record.phone_number,
-                "instance": call_record.instance,
-                "custom_id": call_record.custom_id,
-                "message": f"拨号请求已准备: {call_record.phone_number}",
+                "phone_number": self.call_record.phone_number,
+                "instance": self.call_record.instance,
+                "custom_id": self.call_record.custom_id,
+                "message": f"拨号请求已准备: {self.call_record.phone_number}",
             }
 
         except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error dialing phone %s: %s", call_record.phone_number, e)
-            call_record.status = "无法拨打"
-            call_record.end_time = datetime.now()
-            call_record.duration = 0
-            call_record.notes = str(e)
-            await self.redis_service.update_call_record(call_record)
+            logger.error("Error dialing phone %s: %s", self.call_record.phone_number, e)
+            self.call_record.status = "无法拨打"
+            self.call_record.end_time = datetime.now()
+            self.call_record.duration = 0
+            self.call_record.notes = str(e)
             return {
                 "success": False,
-                "phone_number": call_record.phone_number,
+                "phone_number": self.call_record.phone_number,
                 "error": str(e),
                 "message": f"拨号异常: {str(e)}",
             }
@@ -374,11 +362,20 @@ class PhoneService(BaseService):
             logger.error("Error handling OnConnect message: %s", e)
             return {"success": False, "error": str(e), "message": "处理连接消息失败"}
 
+    def add_dialog_entry(self, event: Event):
+        """添加对话记录"""
+        if self.call_record:
+            self.call_record.dialog_record.append(event.data.get("dialog_entry"))
+            logger.debug("Dialog entry added to call_record for call_id: %s", self.call_id)
+        else:
+            logger.warning("Call record not found for call_id: %s", self.call_id)
+
     async def _call_finished(self, _: Event = None):
         """通话结束"""
         self.call_finished = True
         self.call_id = None
         self.instance = None
+        await self.redis_service.update_call_record(self.call_record)
         await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 

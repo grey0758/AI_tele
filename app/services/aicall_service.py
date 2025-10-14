@@ -36,7 +36,6 @@ class AicallService(BaseService):
 
     async def register_event_listeners(self):
         """注册事件监听器"""
-        # await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self.reset_to_initialized_state)
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL, self.auto_call_next_phone, timeout=30.0)
 
     async def make_call(self, call_request: CallRequest):
@@ -167,7 +166,7 @@ class AicallService(BaseService):
             call_request = CallRequest(
                 phone_number=phone_number,
                 device_index=0,
-                tts_opening="你好老板，我是广州大麦的小麦，我们在寻找联合运营的合作伙伴，共同投入共同分成的方式，问您目前有考虑联合运营的需求吗？",
+                tts_opening="",
                 custom_id= None
             )
 

@@ -788,8 +788,8 @@ class DialogSession:
                     content=content,
                     timestamp=datetime.now()
                 )
-                logger.debug("Emitting REDIS_ADD_DIALOG_RECORD event for call_id: %s", self.realtime_service.call_id)
-                await self.realtime_service.emit_event(EventType.REDIS_ADD_DIALOG_RECORD, {"call_id": self.realtime_service.call_id, "dialog_entry": dialog_entry})
+                logger.debug("Emitting PHONE_SERVICE_ADD_DIALOG_ENTRY event for call_id: %s", self.realtime_service.call_id)
+                await self.realtime_service.emit_event(EventType.PHONE_SERVICE_ADD_DIALOG_ENTRY, {"dialog_entry": dialog_entry})
             except Exception as e: # pylint: disable=broad-except
                 logger.error("Failed to add dialog entry: %s", e)
 

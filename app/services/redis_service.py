@@ -85,7 +85,6 @@ class RedisService(BaseService):
 
     async def register_event_listeners(self):
         """注册事件监听器"""
-        await self._register_listener(EventType.REDIS_ADD_DIALOG_RECORD, self.add_dialog_record)
 
     async def shutdown(self):
         """异步关闭 Redis 连接"""
@@ -585,33 +584,6 @@ class RedisService(BaseService):
             logger.error("Failed to update call record dialog record: %s", e)
             return False
 
-    async def add_dialog_record(self, event: Event) -> bool:
-        """
-        添加对话记录 - 使用分布式锁
-        """
-        logger.debug("Adding dialog record: %s", event.data)
-        self._ensure_connected()
-        try:
-            call_id : str = event.data.get("call_id")
-            dialog_entry : DialogEntry = event.data.get("dialog_entry")
-            async with self.acquire_lock(f"{self.DIALOG_RECORD_PREFIX}{call_id}"):
-                dialog_record: DialogRecord | None = await self._get_dialog_record_without_lock(call_id)
-                if not dialog_record:
-                    logger.debug("Dialog record not found, creating new one for call_id: %s", call_id)
-                    dialog_record = DialogRecord(
-                        call_id=call_id,
-                        dialog_record=[]
-                    )
-                dialog_record.dialog_record.append(dialog_entry)
-                self.redis_client.set(
-                    f"{self.DIALOG_RECORD_PREFIX}{call_id}",
-                    dialog_record.model_dump_json(),
-                    ex=86400,
-                )
-                return True
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Failed to add dialog record: %s", e)
-            return False
 
 
     async def set_device_info_input_audio_and_output_audio(
