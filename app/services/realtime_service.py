@@ -464,10 +464,10 @@ class RealtimeDialogClient:
 
         # 打印StartSession请求的所有参数
         logger.debug("发送StartSession请求，事件ID: 100")
-        # logger.debug("StartSession请求参数:")
-        # logger.debug("ASR配置: %s", json.dumps(request_params.get("asr", {}), ensure_ascii=False, indent=2))
-        # logger.debug("TTS配置: %s", json.dumps(request_params.get("tts", {}), ensure_ascii=False, indent=2))
-        # logger.debug("Dialog配置: %s", json.dumps(request_params.get("dialog", {}), ensure_ascii=False, indent=2))
+        logger.debug("StartSession请求参数:")
+        logger.debug("ASR配置: %s", json.dumps(request_params.get("asr", {}), ensure_ascii=False, indent=2))
+        logger.debug("TTS配置: %s", json.dumps(request_params.get("tts", {}), ensure_ascii=False, indent=2))
+        logger.debug("Dialog配置: %s", json.dumps(request_params.get("dialog", {}), ensure_ascii=False, indent=2))
 
         payload_bytes = str.encode(json.dumps(request_params))
         payload_bytes = gzip.compress(payload_bytes)
@@ -736,57 +736,29 @@ class DialogSession:
         self.chat_response_lock = threading.Lock()
 
         self.audio_queue: queue.Queue = queue.Queue()
-        
-        # 延迟初始化音频设备，避免阻塞
-        self.audio_device = None
-        self.output_stream = None
-        self.input_stream = None
+        self.audio_device = AudioDeviceManager(
+            AudioConfig(**INPUT_AUDIO_CONFIG),
+            AudioConfig(**OUTPUT_AUDIO_CONFIG)
+        )
+        # 初始化音频队列和输出流
+        self.output_stream = self.audio_device.open_output_stream()
+        # 启动播放线程
         self.is_recording = True
         self.is_playing = True
-        self.player_thread = None
-        self.microphone_ready = False
+        self.player_thread = threading.Thread(target=self._audio_player_thread)
+        self.player_thread.daemon = True
+        self.player_thread.start()
 
-    async def _init_audio_device(self):
-        """异步初始化音频设备"""
-        try:
-            loop = asyncio.get_event_loop()
-            
-            # 在后台线程中初始化音频设备
-            self.audio_device = await loop.run_in_executor(
-                None, 
-                lambda: AudioDeviceManager(
-                    AudioConfig(**INPUT_AUDIO_CONFIG),
-                    AudioConfig(**OUTPUT_AUDIO_CONFIG)
-                )
-            )
-            
-            # 初始化输出流
-            self.output_stream = await loop.run_in_executor(
-                None, 
-                self.audio_device.open_output_stream
-            )
-            
-            # 启动播放线程
-            self.player_thread = threading.Thread(target=self._audio_player_thread)
-            self.player_thread.daemon = True
-            self.player_thread.start()
-            
-            logger.info("音频设备初始化完成")
-            
-        except Exception as e: # pylint: disable=broad-except
-            logger.error("音频设备初始化失败: %s", e)
-            raise
+        # 预先初始化麦克风流，减少后续阻塞
+        self.input_stream = None
+        # 异步预初始化麦克风
+        asyncio.create_task(self._pre_init_microphone())
 
     async def _pre_init_microphone(self):
         """预初始化麦克风"""
         try:
-            if not self.audio_device:
-                await self._init_audio_device()
-            
             loop = asyncio.get_event_loop()
             self.input_stream = await loop.run_in_executor(None, self.audio_device.open_input_stream)
-            self.microphone_ready = True
-            logger.info("麦克风预初始化完成")
         except Exception as e: # pylint: disable=broad-except
             logger.error("预初始化麦克风失败: %s", e)
 
@@ -796,7 +768,7 @@ class DialogSession:
             try:
                 # 从队列获取音频数据，使用更短的超时时间
                 audio_data = self.audio_queue.get(timeout=0.1)
-                if audio_data is not None and self.output_stream:
+                if audio_data is not None:
                     self.output_stream.write(audio_data)
             except queue.Empty:
                 # 队列为空时短暂等待
@@ -983,10 +955,6 @@ class DialogSession:
         self.is_recording = False
         self.is_playing = False
         self.is_running = False
-        
-        # 等待播放线程结束
-        if self.player_thread and self.player_thread.is_alive():
-            self.player_thread.join(timeout=1.0)
 
     async def receive_loop(self):
         """接收服务器响应"""
@@ -998,7 +966,7 @@ class DialogSession:
                     logger.info("会话结束事件: %s", response['event'])
                     self.is_session_finished = True
                     break
-                
+
         except asyncio.CancelledError:
             logger.debug("接收任务已取消")
         except Exception as e: # pylint: disable=broad-except
@@ -1012,49 +980,31 @@ class DialogSession:
 
     async def process_microphone_input(self) -> None:
         """处理麦克风输入"""
-        # 立即发送开场白，不等待麦克风初始化
         await self.client.say_hello()
-        logger.info("开场白已发送")
 
-        # 异步启动麦克风初始化
-        asyncio.create_task(self._pre_init_microphone())
-
-        # 等待麦克风预初始化完成，但设置超时
-        timeout_count = 0
-        max_timeout = 1000  # 最多等待10秒
-        
-        while not self.microphone_ready and timeout_count < max_timeout:
+        # 等待麦克风预初始化完成
+        while self.input_stream is None:
             await asyncio.sleep(0.01)
-            timeout_count += 1
-
-        if not self.microphone_ready:
-            logger.warning("麦克风初始化超时，继续运行")
-            return
 
         # 启动流
-        if self.input_stream:
-            self.input_stream.start_stream()
-            logger.info("麦克风已就绪，请开始说话")
+        self.input_stream.start_stream()
+        logger.info("麦克风已就绪，请开始说话")
 
-            while self.is_recording:
-                try:
-                    # 使用更小的chunk和更短的超时时间
-                    audio_data = self.input_stream.read(INPUT_AUDIO_CONFIG["chunk"], exception_on_overflow=False)
-                    await self.client.task_request(audio_data)
-                    # 减少等待时间，提高响应性
-                    await asyncio.sleep(0.005)
-                except Exception as e: # pylint: disable=broad-except
-                    logger.error("读取麦克风数据出错: %s", e)
-                    await asyncio.sleep(0.01)
+        while self.is_recording:
+            try:
+                # 使用更小的chunk和更短的超时时间
+                audio_data = self.input_stream.read(INPUT_AUDIO_CONFIG["chunk"], exception_on_overflow=False)
+                await self.client.task_request(audio_data)
+                # 减少等待时间，提高响应性
+                await asyncio.sleep(0.005)
+            except Exception as e: # pylint: disable=broad-except
+                logger.error("读取麦克风数据出错: %s", e)
+                await asyncio.sleep(0.01)
 
     async def start(self) -> None:
         """启动对话会话"""
         try:
-            # 先建立WebSocket连接
             await self.client.connect()
-            
-            # 立即初始化音频设备，不阻塞
-            asyncio.create_task(self._init_audio_device())
 
             mic_task = asyncio.create_task(self.process_microphone_input())
             receive_task = asyncio.create_task(self.receive_loop())
@@ -1077,8 +1027,7 @@ class DialogSession:
         except Exception as e: # pylint: disable=broad-except
             logger.error("会话错误: %s", e)
         finally:
-            if self.audio_device:
-                self.audio_device.cleanup()
+            self.audio_device.cleanup()
 
 
 
