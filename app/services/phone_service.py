@@ -350,7 +350,7 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
-            asyncio.run(self.emit_event(EventType.REDIS_SET_DEVICE_INFO, device_info))
+            asyncio.run(self.redis_service.set_device_info(device_info))
 
             return {
                 "success": True,
@@ -375,9 +375,8 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
-        await self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record)
+        await self.redis_service.update_call_record(self.call_record)
         await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
-        self.call_record = None
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
     def stop(self):

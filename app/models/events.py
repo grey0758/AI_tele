@@ -23,9 +23,7 @@ class EventType(Enum):
     RECORD_CALL_END = "record.call_end"
 
     PHONE_SERVICE_ADD_DIALOG_ENTRY = "phone_service.add_dialog_entry"
-    REDIS_CREATE_CALL_RECORD = "redis.create_call_record"
     REDIS_BIND_DIALOG_RECORD_TO_CALL_RECORD = "redis.bind_dialog_record_to_call_record"
-    REDIS_SET_DEVICE_INFO = "redis.set_device_info"
 
     # 自定义事件
     CUSTOM = "custom"
