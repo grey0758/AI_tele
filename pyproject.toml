@@ -126,3 +126,8 @@ disable = [
     "trailing-whitespace",     # 禁用尾随空格的警告
 ]
 
+[dependency-groups]
+dev = [
+    "aiomonitor>=0.7.1",
+]
+
