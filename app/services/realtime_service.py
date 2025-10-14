@@ -17,7 +17,6 @@ from app.core.event_bus import ProductionEventBus
 from app.services.phone_service import OnMessageType
 from app.core.logger import get_logger
 from app.services.base_service import BaseService
-from app.services.redis_service import RedisService
 from app.models.events import Event, EventType
 from app.models.call_record import DialogEntry
 
@@ -1038,11 +1037,9 @@ class RealtimeService(BaseService):
 
     def __init__(
         self,
-        event_bus: Optional[ProductionEventBus] = None,
-        redis_service: Optional[RedisService] = None,
+        event_bus: Optional[ProductionEventBus] = None
     ):
         super().__init__(event_bus=event_bus, service_name="RealtimeService")
-        self.redis_service = redis_service
         self.ws_config = WS_CONNECT_CONFIG
         self.is_running = False
         self.current_session: str | None = None
@@ -1160,6 +1157,5 @@ class RealtimeService(BaseService):
         return {
             **base_health,
             "is_running": self.is_running,
-            "has_redis_service": self.redis_service is not None,
             "ws_config_available": self.ws_config is not None,
         }
