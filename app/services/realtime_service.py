@@ -968,7 +968,6 @@ class DialogSession:
                     break
                 if 'event' in response and response['event'] == 359:
                     logger.info("TTS播放结束")
-                    self.is_session_finished = True
                     break
                 else:
                     break
