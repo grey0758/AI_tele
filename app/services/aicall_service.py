@@ -2,10 +2,10 @@
 
 # app/services/aicall_service.py
 from datetime import datetime
-import asyncio
 from fastapi import HTTPException
 from sqlalchemy import select
 from app.models.events import Event
+import asyncio
 from app.models.events import EventType
 from app.schemas.aicall import CallRequest
 from app.core.logger import get_logger
@@ -36,6 +36,7 @@ class AicallService(BaseService):
 
     async def register_event_listeners(self):
         """注册事件监听器"""
+        # await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self.reset_to_initialized_state)
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL, self.auto_call_next_phone, timeout=30.0)
 
     async def make_call(self, call_request: CallRequest):
@@ -101,7 +102,7 @@ class AicallService(BaseService):
                 total_result = await session.execute(total_stmt)
                 total_records = total_result.scalars().all()
                 
-                available_stmt = select(PhoneCallQueue).where(not PhoneCallQueue.is_called)
+                available_stmt = select(PhoneCallQueue).where(PhoneCallQueue.is_called == False)
                 available_result = await session.execute(available_stmt)
                 available_records = available_result.scalars().all()
                 
@@ -118,7 +119,7 @@ class AicallService(BaseService):
                 # 使用SELECT ... FOR UPDATE锁定行，确保原子性
                 stmt = (
                     select(PhoneCallQueue)
-                    .where(not PhoneCallQueue.is_called)
+                    .where(PhoneCallQueue.is_called == False)
                     .order_by(PhoneCallQueue.created_at.asc())
                     .limit(1)
                     .with_for_update(skip_locked=True)  # 跳过已被锁定的行
