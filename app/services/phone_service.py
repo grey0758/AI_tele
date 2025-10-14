@@ -16,7 +16,7 @@ from app.core.event_bus import ProductionEventBus
 from app.models.call_record import DialogEntry
 from app.models.device_info import Device
 from app.services.base_service import BaseService
-from app.services.redis_service import DeviceInfo, RedisService
+from app.services.redis_service import DeviceInfo
 from app.core.config import settings
 
 
@@ -52,8 +52,7 @@ class PhoneService(BaseService):
 
     def __init__(
         self,
-        event_bus: Optional[ProductionEventBus] = None,
-        redis_service: Optional[RedisService] = None,
+        event_bus: Optional[ProductionEventBus] = None
     ):
         super().__init__(event_bus, "PhoneService")
         self.ws_url = "ws://127.0.0.1:9898/ws"
@@ -61,7 +60,6 @@ class PhoneService(BaseService):
         self.ws_thread = None
         self.should_stop = False
         self._is_running = False
-        self.redis_service = redis_service
 
         self.call_id = None
         self.instance = None
@@ -350,7 +348,7 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
-            asyncio.run(self.redis_service.set_device_info(device_info))
+            asyncio.run(self.emit_event(EventType.REDIS_SET_DEVICE_INFO, device_info))
 
             return {
                 "success": True,

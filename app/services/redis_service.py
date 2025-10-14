@@ -86,6 +86,7 @@ class RedisService(BaseService):
     async def register_event_listeners(self):
         """注册事件监听器"""
         await self._register_listener(EventType.REDIS_CREATE_CALL_RECORD, self.create_call_record)
+        await self._register_listener(EventType.REDIS_SET_DEVICE_INFO, self.handle_set_device_info)
 
     async def shutdown(self):
         """异步关闭 Redis 连接"""
@@ -286,6 +287,27 @@ class RedisService(BaseService):
                 return True
         except Exception as e:  # pylint: disable=broad-except
             logger.error("Failed to save device info: %s", e)
+            return False
+
+    # ==================== 设备信息管理 ====================
+
+    async def handle_set_device_info(self, event: Event) -> bool:
+        """
+        处理设置设备信息事件
+        
+        Args:
+            event: 包含device_info的事件
+            
+        Returns:
+            bool: 处理是否成功
+        """
+        try:
+            device_info = event.data
+            await self.set_device_info(device_info)
+            logger.info("设备信息设置成功")
+            return True
+        except Exception as e: # pylint: disable=broad-except
+            logger.error("设置设备信息失败: %s", e)
             return False
 
     # ==================== 电话记录管理（使用分布式锁） ====================

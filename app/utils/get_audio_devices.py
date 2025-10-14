@@ -18,9 +18,37 @@ def get_audio_devices(
     Returns:
         Tuple[List[InputDevice], List[OutputDevice]]: (输入设备列表, 输出设备列表)
     """
-    p = pyaudio.PyAudio()
-
+    p = None
     try:
+        # 添加超时机制，避免PyAudio初始化阻塞
+        import threading
+        
+        pyaudio_instance = None
+        init_error = None
+        
+        def init_pyaudio():
+            nonlocal pyaudio_instance, init_error
+            try:
+                pyaudio_instance = pyaudio.PyAudio()
+            except Exception as e:
+                init_error = e
+        
+        # 在单独线程中初始化PyAudio，设置5秒超时
+        init_thread = threading.Thread(target=init_pyaudio)
+        init_thread.daemon = True
+        init_thread.start()
+        init_thread.join(timeout=5)
+        
+        if init_thread.is_alive():
+            logger.error("PyAudio初始化超时，可能被系统阻塞")
+            return [], []
+        
+        if init_error:
+            logger.error("PyAudio初始化失败: %s", init_error)
+            return [], []
+        
+        p = pyaudio_instance
+
         device_count = p.get_device_count()
         input_devices = []
         output_devices = []
@@ -30,50 +58,54 @@ def get_audio_devices(
         output_device_map: Dict[str, OutputDevice] = {}
 
         for i in range(device_count):
-            device_info = p.get_device_info_by_index(i)
-            device_name = device_info.get("name", "")
+            try:
+                device_info = p.get_device_info_by_index(i)
+                device_name = device_info.get("name", "")
 
-            # 如果是输入设备
-            if device_info["maxInputChannels"] > 0:
-                input_device = InputDevice(
-                    index=i,
-                    name=device_name,
-                    maxInputChannels=device_info.get("maxInputChannels"),
-                    maxOutputChannels=device_info.get("maxOutputChannels"),
-                    defaultSampleRate=device_info.get("defaultSampleRate"),
-                    deviceType="input",
-                )
+                # 如果是输入设备
+                if device_info["maxInputChannels"] > 0:
+                    input_device = InputDevice(
+                        index=i,
+                        name=device_name,
+                        maxInputChannels=device_info.get("maxInputChannels"),
+                        maxOutputChannels=device_info.get("maxOutputChannels"),
+                        defaultSampleRate=device_info.get("defaultSampleRate"),
+                        deviceType="input",
+                    )
 
-                if deduplicate:
-                    # 去重：只保留最小索引的设备
-                    if (
-                        device_name not in input_device_map
-                        or i < input_device_map[device_name].index
-                    ):
-                        input_device_map[device_name] = input_device
-                else:
-                    input_devices.append(input_device)
+                    if deduplicate:
+                        # 去重：只保留最小索引的设备
+                        if (
+                            device_name not in input_device_map
+                            or i < input_device_map[device_name].index
+                        ):
+                            input_device_map[device_name] = input_device
+                    else:
+                        input_devices.append(input_device)
 
-            # 如果是输出设备
-            if device_info["maxOutputChannels"] > 0:
-                output_device = OutputDevice(
-                    index=i,
-                    name=device_name,
-                    maxInputChannels=device_info.get("maxInputChannels"),
-                    maxOutputChannels=device_info.get("maxOutputChannels"),
-                    defaultSampleRate=device_info.get("defaultSampleRate"),
-                    deviceType="output",
-                )
+                # 如果是输出设备
+                if device_info["maxOutputChannels"] > 0:
+                    output_device = OutputDevice(
+                        index=i,
+                        name=device_name,
+                        maxInputChannels=device_info.get("maxInputChannels"),
+                        maxOutputChannels=device_info.get("maxOutputChannels"),
+                        defaultSampleRate=device_info.get("defaultSampleRate"),
+                        deviceType="output",
+                    )
 
-                if deduplicate:
-                    # 去重：只保留最小索引的设备
-                    if (
-                        device_name not in output_device_map
-                        or i < output_device_map[device_name].index
-                    ):
-                        output_device_map[device_name] = output_device
-                else:
-                    output_devices.append(output_device)
+                    if deduplicate:
+                        # 去重：只保留最小索引的设备
+                        if (
+                            device_name not in output_device_map
+                            or i < output_device_map[device_name].index
+                        ):
+                            output_device_map[device_name] = output_device
+                    else:
+                        output_devices.append(output_device)
+            except Exception as e:
+                logger.warning("获取设备 %d 信息失败: %s", i, e)
+                continue
 
         # 如果启用去重，从字典中提取设备列表
         if deduplicate:
@@ -87,9 +119,13 @@ def get_audio_devices(
         return input_devices, output_devices
     except Exception as e:  # pylint: disable=broad-except
         logger.error("获取设备信息时出错: %s", e)
-        raise e
+        return [], []
     finally:
-        p.terminate()
+        if p:
+            try:
+                p.terminate()
+            except Exception as e:
+                logger.warning("PyAudio终止时出错: %s", e)
 
 
 def get_input_devices(deduplicate: bool = True) -> List[InputDevice]:

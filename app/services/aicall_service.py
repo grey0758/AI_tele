@@ -4,15 +4,14 @@
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy import select, false
-from app.models.events import Event
 import asyncio
+from app.models.events import Event
 from app.models.events import EventType
 from app.schemas.aicall import CallRequest
 from app.core.logger import get_logger
 from app.models.call_record import CallRecord
 from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
-from app.services.redis_service import RedisService
 from app.db.database import Database
 from app.models.phone_call_queue import PhoneCallQueue
 
@@ -23,9 +22,8 @@ logger = get_logger(__name__)
 class AicallService(BaseService):
     """AI电话服务类 - 处理实际的电话拨打逻辑"""
 
-    def __init__(self, event_bus: ProductionEventBus, redis_service: RedisService, db: Database = None):
+    def __init__(self, event_bus: ProductionEventBus, db: Database = None):
         super().__init__(event_bus=event_bus, service_name="AicallService")
-        self.redis_service = redis_service
         self.db = db
         self.is_ended = True  # 是否通话结束
         self.machine_id = f"machine_{id(self)}"  # 机器标识符
