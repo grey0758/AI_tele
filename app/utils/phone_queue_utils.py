@@ -1,9 +1,8 @@
 import csv
 import asyncio
 import os
-from typing import List, Tuple
+from typing import List
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from app.db.database import Database
 from app.core.logger import get_logger
 
@@ -14,7 +13,7 @@ class PhoneQueueUtils:
     def __init__(self, db: Database):
         self.db = db
 
-    async def load_phones_from_csv(self, csv_file_path: str) -> List[Tuple[str, str]]:
+    async def load_phones_from_csv(self, csv_file_path: str) -> List[str]:
         """从CSV文件读取电话号码数据"""
         phones_data = []
         
@@ -22,12 +21,25 @@ class PhoneQueueUtils:
             raise FileNotFoundError(f"CSV文件不存在: {csv_file_path}")
         
         try:
-            with open(csv_file_path, 'r', encoding='utf-8') as file:
-                csv_reader = csv.reader(file)
-                for row in csv_reader:
-                    if len(row) >= 2 and row[0].strip() and row[1].strip():
-                        id_num, phone = row[0].strip(), row[1].strip()
-                        phones_data.append((id_num, phone))
+            # 尝试多种编码格式
+            encodings = ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']
+            
+            for encoding in encodings:
+                try:
+                    with open(csv_file_path, 'r', encoding=encoding) as file:
+                        csv_reader = csv.reader(file)
+                        for row in csv_reader:
+                            if len(row) >= 1 and row[0].strip():
+                                phone = row[0].strip()
+                                if phone and phone != "电话号码":  # 跳过标题行
+                                    phones_data.append(phone)
+                    logger.info("成功使用 %s 编码读取CSV文件", encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if not phones_data:
+                raise ValueError("无法使用任何编码格式读取CSV文件")
             
             logger.info("从CSV文件读取到 %d 条电话号码数据", len(phones_data))
             return phones_data
@@ -36,8 +48,8 @@ class PhoneQueueUtils:
             logger.error("读取CSV文件失败: %s", e)
             raise
 
-    async def batch_insert_phones(self, phones_data: List[Tuple[str, str]], batch_size: int = 100):
-        """批量插入电话号码到数据库"""
+    async def batch_insert_phones(self, phones_data: List[str], batch_size: int = 100):
+        """批量插入电话号码到数据库，自动处理重复数据"""
         if not phones_data:
             logger.warning("没有数据需要插入")
             return
@@ -51,22 +63,24 @@ class PhoneQueueUtils:
             
             try:
                 async with self.db.get_session() as session:
-                    for _, phone in batch:
+                    for phone in batch:
                         try:
+                            # 使用 INSERT IGNORE 自动跳过重复数据
                             insert_sql = text("""
-                                INSERT INTO phone_call_queue (phone, is_called) 
+                                INSERT IGNORE INTO phone_call_queue (phone, is_called) 
                                 VALUES (:phone, :is_called)
                             """)
-                            await session.execute(insert_sql, {
+                            result = await session.execute(insert_sql, {
                                 "phone": phone,
                                 "is_called": False
                             })
-                            success_count += 1
                             
-                        except IntegrityError:
-                            duplicate_count += 1
-                            logger.debug("电话号码 %s 已存在，跳过", phone)
-                            continue
+                            if result.rowcount > 0:
+                                success_count += 1
+                            else:
+                                duplicate_count += 1
+                                logger.debug("电话号码 %s 已存在，跳过", phone)
+                            
                         except Exception as e:
                             error_count += 1
                             logger.error("插入电话号码 %s 失败: %s", phone, e)
@@ -83,7 +97,7 @@ class PhoneQueueUtils:
     async def add_phones_from_csv(self, csv_file_path: str = None):
         """从CSV文件添加电话号码到队列的主函数"""
         if csv_file_path is None:
-            csv_file_path = os.path.join(os.path.dirname(__file__), "四月线索表.csv")
+            csv_file_path = os.path.join(os.path.dirname(__file__), "公海名单20240201以前.csv")
         
         try:
             phones_data = await self.load_phones_from_csv(csv_file_path)
