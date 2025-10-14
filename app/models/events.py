@@ -17,6 +17,8 @@ class EventType(Enum):
     PHONE_SERVICE_TERMINATECALL = "phone_service.terminatecall"
     PHONE_SERVICE_ONHANGUP_AUTO_CALL = "phone_service.onhangup_auto_call"
 
+    REALTIME_SERVICE_ONHANGUP_AUTO_CALL = "realtime_service.onhangup_auto_call"
+
 
     RECORD_CALL_END = "record.call_end"
 

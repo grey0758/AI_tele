@@ -3,12 +3,9 @@
 import json
 import queue
 import random
-import signal
-import sys
 import threading
 import time
 import uuid
-import wave
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
@@ -715,24 +712,17 @@ class RealtimeDialogClient:
 
 class DialogSession:
     """对话会话管理类"""
-    is_audio_file_input: bool
     mod: str
 
-    def __init__(self, ws_config: Dict[str, Any], output_audio_format: str = "pcm", audio_file_path: str = "",
-                 mod: str = "audio", recv_timeout: int = 10, realtime_service: Optional['RealtimeService'] = None):
-        self.audio_file_path = audio_file_path
+    def __init__(self, ws_config: Dict[str, Any], output_audio_format: str = "pcm", recv_timeout: int = 10, realtime_service: Optional['RealtimeService'] = None):
         self.recv_timeout = recv_timeout
-        self.is_audio_file_input = self.audio_file_path != ""
-        if self.is_audio_file_input:
-            mod = 'audio_file'
-        else:
-            self.say_hello_over_event = asyncio.Event()
-        self.mod = mod
+        self.say_hello_over_event = asyncio.Event()
+        self.mod = "audio"
 
         self.session_id = str(uuid.uuid4())
         self.realtime_service = realtime_service
         self.client = RealtimeDialogClient(config=ws_config, session_id=self.session_id,
-                                           output_audio_format=output_audio_format, mod=mod, recv_timeout=recv_timeout)
+                                           output_audio_format=output_audio_format, mod=self.mod, recv_timeout=recv_timeout)
         if output_audio_format == "pcm_s16le":
             OUTPUT_AUDIO_CONFIG["format"] = "pcm_s16le"
             OUTPUT_AUDIO_CONFIG["bit_size"] = pyaudio.paInt16
@@ -746,30 +736,24 @@ class DialogSession:
         self.chat_response_buffer = ''
         self.chat_response_lock = threading.Lock()
 
-        try:
-            signal.signal(signal.SIGINT, self._keyboard_signal)
-        except (ValueError, OSError):
-            # Windows 上可能不支持 SIGINT，使用其他方式处理
-            pass
         self.audio_queue: queue.Queue = queue.Queue()
-        if not self.is_audio_file_input:
-            self.audio_device = AudioDeviceManager(
-                AudioConfig(**INPUT_AUDIO_CONFIG),
-                AudioConfig(**OUTPUT_AUDIO_CONFIG)
-            )
-            # 初始化音频队列和输出流
-            self.output_stream = self.audio_device.open_output_stream()
-            # 启动播放线程
-            self.is_recording = True
-            self.is_playing = True
-            self.player_thread = threading.Thread(target=self._audio_player_thread)
-            self.player_thread.daemon = True
-            self.player_thread.start()
+        self.audio_device = AudioDeviceManager(
+            AudioConfig(**INPUT_AUDIO_CONFIG),
+            AudioConfig(**OUTPUT_AUDIO_CONFIG)
+        )
+        # 初始化音频队列和输出流
+        self.output_stream = self.audio_device.open_output_stream()
+        # 启动播放线程
+        self.is_recording = True
+        self.is_playing = True
+        self.player_thread = threading.Thread(target=self._audio_player_thread)
+        self.player_thread.daemon = True
+        self.player_thread.start()
 
-            # 预先初始化麦克风流，减少后续阻塞
-            self.input_stream = None
-            # 异步预初始化麦克风
-            asyncio.create_task(self._pre_init_microphone())
+        # 预先初始化麦克风流，减少后续阻塞
+        self.input_stream = None
+        # 异步预初始化麦克风
+        asyncio.create_task(self._pre_init_microphone())
 
     async def _pre_init_microphone(self):
         """预初始化麦克风"""
@@ -839,8 +823,7 @@ class DialogSession:
             if self.is_sending_chat_tts_text:
                 return
             audio_data = response['payload_msg']
-            if not self.is_audio_file_input:
-                self.audio_queue.put(audio_data)
+            self.audio_queue.put(audio_data)
             with self.audio_buffer_lock:
                 self.audio_buffer += audio_data
         elif response['message_type'] == 'SERVER_FULL_RESPONSE':
@@ -968,12 +951,6 @@ class DialogSession:
         logger.debug("触发ChatRAGText事件")
         await self.client.chat_rag_text(self.is_user_querying, external_rag='[{"title":"北京天气","content":"今天北京整体以晴到多云为主，特别是午后至傍晚时段需注意突发降雨。\n💨 风况与湿度\n风力较弱，一般为 2–3 级南风或西南风\n白天湿度较高，早晚略凉爽"}]')
 
-    def _keyboard_signal(self, _sig, _frame):
-        """键盘信号处理"""
-        logger.info("receive keyboard Ctrl+C")
-        self.stop()
-        sys.exit(0)
-
     def stop(self):
         """停止会话"""
         self.is_recording = False
@@ -991,16 +968,13 @@ class DialogSession:
                     self.is_session_finished = True
                     break
                 if 'event' in response and response['event'] == 359:
-                    if self.is_audio_file_input:
-                        logger.info("TTS播放结束")
-                        self.is_session_finished = True
-                        break
-                    else:
-                        if not self.say_hello_over_event.is_set():
-                            logger.info("开场白播放结束")
-                            self.say_hello_over_event.set()
-                        if self.mod == "text":
-                            logger.info("请输入内容：")
+                    logger.info("TTS播放结束")
+                    self.is_session_finished = True
+                    break
+                else:
+                    if not self.say_hello_over_event.is_set():
+                        logger.info("开场白播放结束")
+                        self.say_hello_over_event.set()
 
         except asyncio.CancelledError:
             logger.debug("接收任务已取消")
@@ -1010,101 +984,7 @@ class DialogSession:
             self.stop()
             self.is_session_finished = True
 
-    async def process_audio_file(self) -> None:
-        """处理音频文件"""
-        await self.process_audio_file_input(self.audio_file_path)
 
-    async def process_text_input(self) -> None:
-        """处理文本输入"""
-        await self.client.say_hello()
-        await self.say_hello_over_event.wait()
-
-        try:
-            # 启动输入监听线程
-            input_queue: queue.Queue = queue.Queue()
-            input_thread = threading.Thread(target=self.input_listener, args=(input_queue,), daemon=True)
-            input_thread.start()
-            
-            # 主循环：处理输入和上下文结束
-            while self.is_running and not self.is_session_finished:
-                try:
-                    # 检查是否有输入（非阻塞）
-                    input_str = input_queue.get_nowait()
-                    if input_str is None:
-                        logger.info("Input channel closed")
-                        break
-                    if input_str:
-                        await self.client.chat_text_query(input_str)
-                except queue.Empty:
-                    await asyncio.sleep(0.01)
-                except Exception as e: # pylint: disable=broad-except
-                    logger.error("Main loop error: %s", e)
-                    break
-        finally:
-            logger.debug("退出文本输入模式")
-
-    def input_listener(self, input_queue: queue.Queue) -> None:
-        """在单独线程中监听标准输入"""
-        logger.debug("开始监听用户输入")
-        try:
-            while self.is_running:
-                try:
-                    # 使用非阻塞方式读取标准输入
-                    import select
-                    if sys.platform == "win32":
-                        # Windows 平台使用 msvcrt
-                        import msvcrt
-                        if msvcrt.kbhit():
-                            line = sys.stdin.readline()
-                            if line:
-                                input_str = line.strip()
-                                if input_str:
-                                    input_queue.put(input_str)
-                            else:
-                                input_queue.put(None)
-                                break
-                        else:
-                            time.sleep(0.01)
-                    else:
-                        # Unix 平台使用 select
-                        if select.select([sys.stdin], [], [], 0.01)[0]:
-                            line = sys.stdin.readline()
-                            if line:
-                                input_str = line.strip()
-                                if input_str:
-                                    input_queue.put(input_str)
-                            else:
-                                input_queue.put(None)
-                                break
-                        else:
-                            time.sleep(0.01)
-                except Exception as e: # pylint: disable=broad-except
-                    logger.error("Input listener error: %s", e)
-                    time.sleep(0.01)
-        except Exception as e: # pylint: disable=broad-except
-            logger.error("Input listener error: %s", e)
-            input_queue.put(None)
-
-    async def process_audio_file_input(self, audio_file_path: str) -> None:
-        """处理音频文件输入"""
-        with wave.open(audio_file_path, 'rb') as wf:
-            chunk_size = INPUT_AUDIO_CONFIG["chunk"]
-            framerate = wf.getframerate()  # 采样率（如16000Hz）
-            # 时长 = chunkSize（帧数） ÷ 采样率（帧/秒）
-            sleep_seconds = chunk_size / framerate
-            logger.info("处理音频文件: %s", audio_file_path)
-
-            # 分块读取并发送音频数据
-            while True:
-                audio_data = wf.readframes(chunk_size)
-                if not audio_data:
-                    break  # 文件读取完毕
-
-                await self.client.task_request(audio_data)
-                # sleep与chunk对应的音频时长一致，模拟实时输入
-                await asyncio.sleep(sleep_seconds)
-
-            logger.info("音频文件处理完成")
 
 
     async def process_microphone_input(self) -> None:
@@ -1136,40 +1016,16 @@ class DialogSession:
         try:
             await self.client.connect()
 
-            if self.mod == "text":
-                text_task = asyncio.create_task(self.process_text_input())
-                receive_task = asyncio.create_task(self.receive_loop())
+            mic_task = asyncio.create_task(self.process_microphone_input())
+            receive_task = asyncio.create_task(self.receive_loop())
 
-                try:
-                    await asyncio.gather(text_task, receive_task, return_exceptions=True)
-                except KeyboardInterrupt:
-                    logger.info("收到键盘中断信号，正在退出...")
-                    self.stop()
-                    text_task.cancel()
-                    receive_task.cancel()
-            else:
-                if self.is_audio_file_input:
-                    audio_task = asyncio.create_task(self.process_audio_file())
-                    receive_task = asyncio.create_task(self.receive_loop())
-
-                    try:
-                        await asyncio.gather(audio_task, receive_task, return_exceptions=True)
-                    except KeyboardInterrupt:
-                        logger.info("收到键盘中断信号，正在退出...")
-                        self.stop()
-                        audio_task.cancel()
-                        receive_task.cancel()
-                else:
-                    mic_task = asyncio.create_task(self.process_microphone_input())
-                    receive_task = asyncio.create_task(self.receive_loop())
-
-                    try:
-                        await asyncio.gather(mic_task, receive_task, return_exceptions=True)
-                    except KeyboardInterrupt:
-                        logger.info("收到键盘中断信号，正在退出...")
-                        self.stop()
-                        mic_task.cancel()
-                        receive_task.cancel()
+            try:
+                await asyncio.gather(mic_task, receive_task, return_exceptions=True)
+            except KeyboardInterrupt:
+                logger.info("收到键盘中断信号，正在退出...")
+                self.stop()
+                mic_task.cancel()
+                receive_task.cancel()
 
             await self.client.finish_session()
             await self.client.finish_connection()
@@ -1181,8 +1037,7 @@ class DialogSession:
         except Exception as e: # pylint: disable=broad-except
             logger.error("会话错误: %s", e)
         finally:
-            if not self.is_audio_file_input:
-                self.audio_device.cleanup()
+            self.audio_device.cleanup()
 
 
 
@@ -1215,13 +1070,11 @@ class RealtimeService(BaseService):
     async def register_event_listeners(self):
         """注册事件监听器"""
         await self._register_listener(EventType.PHONE_SERVICE_ONANSWER, self.handle_realtime_start)
-        await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self.handle_realtime_stop)
+        await self._register_listener(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, self.handle_realtime_stop)
 
     async def main(
         self,
         audio_format: str = "pcm",
-        audio: str = "",
-        mod: str = "audio",
         recv_timeout: int = 10,
     ) -> None:
         """启动实时对话会话"""
@@ -1229,8 +1082,6 @@ class RealtimeService(BaseService):
             session = DialogSession(
                 ws_config=self.ws_config,
                 output_audio_format=audio_format,
-                audio_file_path=audio,
-                mod=mod,
                 recv_timeout=recv_timeout,
                 realtime_service=self,
             )
@@ -1241,9 +1092,9 @@ class RealtimeService(BaseService):
             self.stats["total_failed"] += 1
             raise
 
-    async def start_realtime_dialog(self, **kwargs) -> None:
+    async def start_realtime_dialog(self, audio_format: str = "pcm", recv_timeout: int = 10) -> None:
         """启动实时对话的便捷方法"""
-        await self.main(**kwargs)
+        await self.main(audio_format, recv_timeout)
 
     async def handle_realtime_start(self, event: Event = None) -> bool:
         """处理实时服务启动事件"""
@@ -1257,23 +1108,17 @@ class RealtimeService(BaseService):
             self.call_id = on_message.uuid
 
             audio_format = "pcm"
-            audio = ""
-            mod = "audio"
             recv_timeout = 10
 
             logger.info(
-                "Starting realtime service with default params: format=%s, audio=%s, mod=%s",
+                "Starting realtime service with default params: format=%s",
                 audio_format,
-                audio,
-                mod,
             )
 
             # 创建会话并启动实时对话
             self.current_session = DialogSession(
                 ws_config=self.ws_config,
                 output_audio_format=audio_format,
-                audio_file_path=audio,
-                mod=mod,
                 recv_timeout=recv_timeout,
                 realtime_service=self,
             )

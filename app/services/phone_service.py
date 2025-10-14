@@ -379,6 +379,7 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
+        await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL, with_result=True)
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
     def stop(self):
