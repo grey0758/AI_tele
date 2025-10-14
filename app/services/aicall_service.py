@@ -3,6 +3,7 @@
 # app/services/aicall_service.py
 from datetime import datetime
 from fastapi import HTTPException
+from sqlalchemy import select
 import asyncio
 from app.models.events import Event
 from app.models.events import EventType
@@ -12,6 +13,8 @@ from app.models.call_record import CallRecord
 from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
 from app.services.redis_service import RedisService
+from app.db.database import Database
+
 
 logger = get_logger(__name__)
 
@@ -19,10 +22,12 @@ logger = get_logger(__name__)
 class AicallService(BaseService):
     """AI电话服务类 - 处理实际的电话拨打逻辑"""
 
-    def __init__(self, event_bus: ProductionEventBus, redis_service: RedisService):
+    def __init__(self, event_bus: ProductionEventBus, redis_service: RedisService, db: Database = None):
         super().__init__(event_bus=event_bus, service_name="AicallService")
         self.redis_service = redis_service
+        self.db = db
         self.is_ended = True  # 是否通话结束
+        self.machine_id = f"machine_{id(self)}"  # 机器标识符
 
     async def initialize(self) -> bool:
         """初始化"""
@@ -77,25 +82,66 @@ class AicallService(BaseService):
         self.is_ended = True
         logger.info("Reset to initialized state completed successfully")
 
+    async def get_next_phone_atomically(self) -> str | None:
+        """
+        原子性地获取下一个未拨打的电话号码
+        使用数据库行锁确保分布式环境下的唯一性
+        
+        Returns:
+            str: 电话号码，如果没有可用号码则返回None
+        """
+        if not self.db:
+            logger.error("数据库连接未初始化")
+            return None
+            
+        try:
+            async with self.db.get_session() as session:
+                # 使用SELECT ... FOR UPDATE锁定行，确保原子性
+                stmt = (
+                    select(PhoneCallQueue)
+                    .where(not PhoneCallQueue.is_called)
+                    .order_by(PhoneCallQueue.created_at.asc())
+                    .limit(1)
+                    .with_for_update(skip_locked=True)  # 跳过已被锁定的行
+                )
+                
+                result = await session.execute(stmt)
+                phone_record = result.scalar_one_or_none()
+                
+                if not phone_record:
+                    logger.info("没有可用的电话号码，机器ID: %s", self.machine_id)
+                    return None
+                
+                # 立即标记为已拨打，防止其他机器获取
+                phone_record.is_called = True
+                phone_record.updated_at = datetime.now()
+                
+                await session.commit()
+                
+                logger.info(
+                    "成功获取电话号码: %s, 机器ID: %s, 记录ID: %s", 
+                    phone_record.phone, self.machine_id, phone_record.id
+                )
+                
+                return phone_record.phone
+                
+        except Exception as e:
+            logger.error("获取电话号码失败，机器ID: %s, 错误: %s", self.machine_id, e)
+            return None
+
     async def auto_call_next_phone(self, _: Event | None = None):
-        """从Redis获取下一个电话号码并自动拨打"""
+        """从数据库原子性获取下一个电话号码并自动拨打"""
         try:
             await asyncio.sleep(3)  # 等待3秒
             
-            phones = await self.redis_service.get_phone_queue_batch()
+            # 原子性获取下一个电话号码
+            phone_number = await self.get_next_phone_atomically()
             
-            if not phones:
+            if not phone_number:
                 logger.info("没有更多待打列表，自动拨打结束")
                 return
             
-            phone_info = phones[0]
-            phone_number = phone_info.get("phone")
-            
-            if not phone_number:
-                logger.warning("获取到的电话号码为空")
-                return
-            
-            logger.info("开始自动拨打: 电话=%s", phone_number)
+            logger.info("开始自动拨打: 电话=%s, 机器ID=%s", phone_number, self.machine_id)
             
             # 创建拨打电话请求
             call_request = CallRequest(

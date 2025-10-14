@@ -83,8 +83,7 @@ class PhoneService(BaseService):
     async def initialize(self) -> bool:
         try:
             if not self._is_running:
-                # 异步启动WebSocket连接，不阻塞初始化
-                asyncio.create_task(self._async_connect())
+                self._connect()
                 self._is_running = True
                 logger.info("PhoneService 已启动")
                 return True
@@ -92,14 +91,6 @@ class PhoneService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.error("PhoneService 启动失败 | error=%s", str(e))
             return False
-    
-    async def _async_connect(self):
-        """异步建立WebSocket连接"""
-        try:
-            await asyncio.sleep(0.1)  # 短暂延迟，确保服务初始化完成
-            self._connect()
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("异步WebSocket连接失败: %s", e)
 
     async def register_event_listeners(self):
         """推荐：直接注册模式"""
@@ -126,14 +117,10 @@ class PhoneService(BaseService):
             )
 
             def run_websocket():
-                try:
-                    self.ws.run_forever()
-                except Exception as e:  # pylint: disable=broad-except
-                    logger.error("WebSocket运行异常: %s", e)
+                self.ws.run_forever()
 
             self.ws_thread = threading.Thread(target=run_websocket, daemon=True)
             self.ws_thread.start()
-            logger.info("WebSocket连接线程已启动")
 
         except Exception as e:  # pylint: disable=broad-except
             logger.error("建立 WebSocket 连接异常: %s", e)
@@ -154,7 +141,7 @@ class PhoneService(BaseService):
 
             if notify_type == "OnConnect":
                 # 处理连接成功消息
-                asyncio.run(self.handle_on_connect_message(data))
+                self.handle_on_connect_message(data)
                 logger.info("OnConnect 消息已处理")
 
             elif notify_type == "OnAnswer":
@@ -358,7 +345,7 @@ class PhoneService(BaseService):
         logger.info("Hanging up call on instance %s", self.instance)
         return True
 
-    async def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
+    def handle_on_connect_message(self, message_data: Dict) -> Dict[str, Any]:
         """处理连接消息"""
         try:
             logger.info("Processing OnConnect message")
@@ -375,7 +362,7 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
-            await self.redis_service.set_device_info(device_info)
+            asyncio.run(self.redis_service.set_device_info(device_info))
 
             return {
                 "success": True,
@@ -392,7 +379,7 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
-        await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
+        asyncio.run(self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True))
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
     def stop(self):
