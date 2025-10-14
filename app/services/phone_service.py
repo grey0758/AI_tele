@@ -83,7 +83,8 @@ class PhoneService(BaseService):
     async def initialize(self) -> bool:
         try:
             if not self._is_running:
-                self._connect()
+                # 异步启动WebSocket连接，不阻塞初始化
+                asyncio.create_task(self._async_connect())
                 self._is_running = True
                 logger.info("PhoneService 已启动")
                 return True
@@ -91,6 +92,14 @@ class PhoneService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.error("PhoneService 启动失败 | error=%s", str(e))
             return False
+    
+    async def _async_connect(self):
+        """异步建立WebSocket连接"""
+        try:
+            await asyncio.sleep(0.1)  # 短暂延迟，确保服务初始化完成
+            self._connect()
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("异步WebSocket连接失败: %s", e)
 
     async def register_event_listeners(self):
         """推荐：直接注册模式"""
@@ -117,10 +126,14 @@ class PhoneService(BaseService):
             )
 
             def run_websocket():
-                self.ws.run_forever()
+                try:
+                    self.ws.run_forever()
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.error("WebSocket运行异常: %s", e)
 
             self.ws_thread = threading.Thread(target=run_websocket, daemon=True)
             self.ws_thread.start()
+            logger.info("WebSocket连接线程已启动")
 
         except Exception as e:  # pylint: disable=broad-except
             logger.error("建立 WebSocket 连接异常: %s", e)

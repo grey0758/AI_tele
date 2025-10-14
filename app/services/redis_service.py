@@ -677,7 +677,7 @@ class RedisService(BaseService):
 
     # ==================== 电话队列管理 ====================
 
-    async def get_phone_queue_batch(self, batch_size: int = 10, test_mode: bool = True) -> List[Dict[str, Any]]:
+    async def get_phone_queue_batch(self, batch_size: int = 10, test_mode: bool = False) -> List[Dict[str, Any]]:
         """
         原子性地从数据库获取待打列表，保证多实例并发安全
         
