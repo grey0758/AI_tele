@@ -297,7 +297,7 @@ class PhoneService(BaseService):
             self.call_record.start_time = datetime.now()
 
             # 启动15秒定时器，如果超时则挂断电话
-            self._start_timer("call_timeout", 15, "call_timeout")
+            # self._start_timer("call_timeout", 15, "call_timeout")
 
             logger.info("拨号消息已准备: %s", dial_message)
 
