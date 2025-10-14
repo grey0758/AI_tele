@@ -9,7 +9,7 @@ from app.models.events import Event, EventType
 from app.utils.get_audio_devices import get_audio_devices
 from app.core.config import settings
 from app.core.event_bus import ProductionEventBus
-from app.models.call_record import CallRecord, DialogEntry, DialogRecord
+from app.models.call_record import CallRecord, DialogRecord
 from app.db.database import Database
 from app.core.logger import get_logger
 from app.models.device_info import ConfigAudioDeviceInfo, DeviceInfo
@@ -85,6 +85,7 @@ class RedisService(BaseService):
 
     async def register_event_listeners(self):
         """注册事件监听器"""
+        await self._register_listener(EventType.REDIS_CREATE_CALL_RECORD, self.create_call_record)
 
     async def shutdown(self):
         """异步关闭 Redis 连接"""
@@ -289,16 +290,17 @@ class RedisService(BaseService):
 
     # ==================== 电话记录管理（使用分布式锁） ====================
 
-    async def create_call_record(self, call_record: CallRecord) -> str:
+    async def create_call_record(self, event: Event) -> str:
         """
         创建新的电话记录 - 使用分布式锁
 
         Args:
-            call_record: 电话记录对象
+            event: 包含call_record的事件
 
         Returns:
             str: 生成的UUID
         """
+        call_record = event.data
         self._ensure_connected()
         try:
             async with self.acquire_lock(f"call_record:{call_record.call_id}"):
