@@ -966,7 +966,13 @@ class DialogSession:
                     logger.info("会话结束事件: %s", response['event'])
                     self.is_session_finished = True
                     break
-
+                if 'event' in response and response['event'] == 359:
+                    logger.info("TTS播放结束")
+                    self.is_session_finished = True
+                    break
+                else:
+                    break
+                
         except asyncio.CancelledError:
             logger.debug("接收任务已取消")
         except Exception as e: # pylint: disable=broad-except
