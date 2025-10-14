@@ -1,11 +1,9 @@
 """Redis服务类"""
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
-import json
 from datetime import datetime
 import asyncio
 import redis
-from sqlalchemy import text
 from redis.exceptions import LockError, LockNotOwnedError
 from app.models.events import Event, EventType
 from app.utils.get_audio_devices import get_audio_devices
@@ -672,4 +670,3 @@ class RedisService(BaseService):
         except Exception as e:
             logger.error("Failed to save config audio device info: %s", e)
             raise e
-

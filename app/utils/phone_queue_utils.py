@@ -1,3 +1,4 @@
+"""电话队列工具类"""
 import csv
 import re
 import asyncio
@@ -12,6 +13,7 @@ logger = get_logger(__name__)
 
 
 class PhoneQueueUtils:
+    """电话队列工具类"""
     def __init__(self, db: Database):
         self.db = db
 
@@ -170,7 +172,7 @@ class PhoneQueueUtils:
                 random.shuffle(phones)
                 
                 # 批量更新创建时间以实现重新排序
-                for i, (phone_id, phone) in enumerate(phones):
+                for i, (phone_id, _) in enumerate(phones):
                     update_sql = text("""
                         UPDATE phone_call_queue 
                         SET created_at = DATE_ADD(NOW(), INTERVAL :offset SECOND)
