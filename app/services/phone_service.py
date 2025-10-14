@@ -84,6 +84,13 @@ class PhoneService(BaseService):
             if not self._is_running:
                 self._connect()
                 self._is_running = True
+                
+                # 启动调度器
+                if not self._scheduler_started:
+                    self._scheduler.start()
+                    self._scheduler_started = True
+                    logger.info("调度器已启动")
+                
                 logger.info("PhoneService 已启动")
                 return True
             return True
@@ -309,8 +316,7 @@ class PhoneService(BaseService):
             self.call_record.status = "already_dialed"
             self.call_record.start_time = datetime.now()
 
-            # 启动15秒定时器，如果超时则挂断电话
-            # self._start_timer("call_timeout", 15, "call_timeout")
+            self._start_timer("call_timeout", 15, "call_timeout")
 
             logger.info("拨号消息已准备: %s", dial_message)
 
@@ -419,12 +425,9 @@ class PhoneService(BaseService):
         logger.info("PhoneService 已停止")
 
     def _ensure_scheduler(self):
+        """确保调度器已启动（调度器在初始化时已启动）"""
         if not self._scheduler_started:
-            try:
-                self._scheduler.start()
-                self._scheduler_started = True
-            except Exception as e:  # pylint: disable=broad-except
-                logger.error("启动调度器失败: %s", e)
+            logger.warning("调度器未启动，这不应该发生")
 
     def _start_timer(self, timer_id: str, duration: int, terminate_type: str):
         self._ensure_scheduler()
