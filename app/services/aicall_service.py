@@ -4,14 +4,15 @@
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy import select, false
-import asyncio
 from app.models.events import Event
+import asyncio
 from app.models.events import EventType
 from app.schemas.aicall import CallRequest
 from app.core.logger import get_logger
 from app.models.call_record import CallRecord
 from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
+from app.services.redis_service import RedisService
 from app.db.database import Database
 from app.models.phone_call_queue import PhoneCallQueue
 
@@ -22,8 +23,9 @@ logger = get_logger(__name__)
 class AicallService(BaseService):
     """AI电话服务类 - 处理实际的电话拨打逻辑"""
 
-    def __init__(self, event_bus: ProductionEventBus, db: Database = None):
+    def __init__(self, event_bus: ProductionEventBus, redis_service: RedisService, db: Database = None):
         super().__init__(event_bus=event_bus, service_name="AicallService")
+        self.redis_service = redis_service
         self.db = db
         self.is_ended = True  # 是否通话结束
         self.machine_id = f"machine_{id(self)}"  # 机器标识符
@@ -98,7 +100,7 @@ class AicallService(BaseService):
                 total_result = await session.execute(total_stmt)
                 total_records = total_result.scalars().all()
                 
-                available_stmt = select(PhoneCallQueue).where(PhoneCallQueue.is_called == false()) # pylint: disable=not-callable
+                available_stmt = select(PhoneCallQueue).where(PhoneCallQueue.is_called == false())
                 available_result = await session.execute(available_stmt)
                 available_records = available_result.scalars().all()
                 
@@ -115,7 +117,7 @@ class AicallService(BaseService):
                 # 使用SELECT ... FOR UPDATE锁定行，确保原子性
                 stmt = (
                     select(PhoneCallQueue)
-                    .where(PhoneCallQueue.is_called == false()) # pylint: disable=not-callable
+                    .where(PhoneCallQueue.is_called == false()) 
                     .order_by(PhoneCallQueue.created_at.asc())
                     .limit(1)
                     .with_for_update(skip_locked=True)  # 跳过已被锁定的行
