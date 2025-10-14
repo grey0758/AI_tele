@@ -7,6 +7,8 @@
 """
 from contextlib import asynccontextmanager
 import uvicorn
+import asyncio
+import os
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,11 +17,20 @@ from app.api.v1.api import api_router
 from app.core.dependencies import service_container, check_services_health
 from app.middleware.logging import logging_middleware
 from app.schemas.base import ResponseBuilder
+from app.core.monitor import setup_monitor, get_monitor_commands
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
     print("🚀 Starting application")
+
+    # 启动监控（仅在开发环境）
+    monitor = None
+    if os.getenv("ENABLE_MONITOR", "false").lower() == "true":
+        loop = asyncio.get_running_loop()
+        monitor = setup_monitor(loop)
+        if monitor:
+            print(get_monitor_commands())
 
     try:
         # 初始化服务容器（包含事件总线和所有服务）
@@ -36,6 +47,8 @@ async def lifespan(_app: FastAPI):
     # 关闭阶段
     print("🛑 Shutting down application")
     await service_container.shutdown()
+    if monitor:
+        print("🛑 Shutting down monitor")
     print("👋 Application shutdown completed")
 
 

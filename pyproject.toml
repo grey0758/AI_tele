@@ -60,6 +60,8 @@ dev = [
     # 类型检查
     "mypy>=1.18.2",
     "types-aiofiles>=24.1.0.20250822",
+    # 异步监控
+    "aiomonitor>=0.6.0",
 ]
 audio = [
     "pyaudio>=0.2.11",
