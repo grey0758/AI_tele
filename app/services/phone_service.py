@@ -65,7 +65,7 @@ class PhoneService(BaseService):
 
         self.call_id = None
         self.instance = None
-        self.call_record = None
+        self.call_record  = None
         self.call_finished = False
 
         self.device_info = None
@@ -267,7 +267,7 @@ class PhoneService(BaseService):
                     "message": "拨号失败，请检查事件数据",
                 }
 
-            self.call_record = self.call_record
+            self.call_record = event.data
             self.call_id = self.call_record.call_id
             self.instance = self.device_info.devices[self.call_record.instance].instance
 
@@ -375,8 +375,9 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
-        await self.redis_service.update_call_record(self.call_record)
+        await self.redis_service.create_call_record(self.call_record)
         await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
+        self.call_record = None
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
     def stop(self):

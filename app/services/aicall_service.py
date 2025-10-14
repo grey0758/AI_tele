@@ -66,9 +66,8 @@ class AicallService(BaseService):
                 instance=call_request.device_index,
                 start_time=datetime.now(),
                 call_type="呼出",
+                dialog_record=[]
             )
-
-            await self.redis_service.create_call_record(call_record)
 
             await self.emit_event(EventType.PHONE_SERVICE_CALL_OUT, call_record)
             logger.info("Call initiated to %s", call_record.phone_number)
