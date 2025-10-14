@@ -464,10 +464,10 @@ class RealtimeDialogClient:
 
         # 打印StartSession请求的所有参数
         logger.debug("发送StartSession请求，事件ID: 100")
-        logger.debug("StartSession请求参数:")
-        logger.debug("ASR配置: %s", json.dumps(request_params.get("asr", {}), ensure_ascii=False, indent=2))
-        logger.debug("TTS配置: %s", json.dumps(request_params.get("tts", {}), ensure_ascii=False, indent=2))
-        logger.debug("Dialog配置: %s", json.dumps(request_params.get("dialog", {}), ensure_ascii=False, indent=2))
+        # logger.debug("StartSession请求参数:")
+        # logger.debug("ASR配置: %s", json.dumps(request_params.get("asr", {}), ensure_ascii=False, indent=2))
+        # logger.debug("TTS配置: %s", json.dumps(request_params.get("tts", {}), ensure_ascii=False, indent=2))
+        # logger.debug("Dialog配置: %s", json.dumps(request_params.get("dialog", {}), ensure_ascii=False, indent=2))
 
         payload_bytes = str.encode(json.dumps(request_params))
         payload_bytes = gzip.compress(payload_bytes)
@@ -965,11 +965,6 @@ class DialogSession:
                 if 'event' in response and (response['event'] == 152 or response['event'] == 153):
                     logger.info("会话结束事件: %s", response['event'])
                     self.is_session_finished = True
-                    break
-                if 'event' in response and response['event'] == 359:
-                    logger.info("TTS播放结束")
-                    break
-                else:
                     break
                 
         except asyncio.CancelledError:
