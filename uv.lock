@@ -57,6 +57,11 @@ dev = [
     { name = "wheel" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "aiomonitor" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiofiles" },
@@ -96,6 +101,9 @@ requires-dist = [
     { name = "wheel", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "audio", "cloud"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "aiomonitor", specifier = ">=0.7.1" }]
 
 [[package]]
 name = "aioconsole"
