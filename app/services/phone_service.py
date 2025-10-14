@@ -297,7 +297,7 @@ class PhoneService(BaseService):
             self.call_record.start_time = datetime.now()
 
             # 启动15秒定时器，如果超时则挂断电话
-            # self._start_timer("call_timeout", 15, "call_timeout")
+            self._start_timer("call_timeout", 15, "call_timeout")
 
             logger.info("拨号消息已准备: %s", dial_message)
 
@@ -375,7 +375,7 @@ class PhoneService(BaseService):
         self.call_finished = True
         self.call_id = None
         self.instance = None
-        await self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record)
+        await self.emit_event(EventType.RE, self.call_record)
         await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 
