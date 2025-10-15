@@ -2,11 +2,11 @@
 
 # app/services/aicall_service.py
 from datetime import datetime
+import asyncio
+import re
 from fastapi import HTTPException
 from sqlalchemy import select, false
-from app.models.events import Event
-import asyncio
-from app.models.events import EventType
+from app.models.events import Event, EventType
 from app.schemas.aicall import CallRequest
 from app.core.logger import get_logger
 from app.models.call_record import CallRecord
@@ -81,6 +81,12 @@ class AicallService(BaseService):
         self.is_ended = True
         logger.info("Reset to initialized state completed successfully")
 
+    def _is_valid_phone_number(self, phone_number: str) -> bool:
+        """验证电话号码格式是否符合要求"""
+        # 匹配11位手机号，以1开头，第二位是3-9
+        pattern = r'^1[3-9]\d{9}$'
+        return bool(re.match(pattern, phone_number))
+
     async def get_next_phone_atomically(self) -> str | None:
         """
         原子性地获取下一个未拨打的电话号码
@@ -147,10 +153,16 @@ class AicallService(BaseService):
             logger.error("获取电话号码失败，机器ID: %s, 错误: %s", self.machine_id, e)
             return None
 
-    async def auto_call_next_phone(self, _: Event | None = None):
+    async def auto_call_next_phone(self, _: Event | None = None, retry_count: int = 0):
         """从数据库原子性获取下一个电话号码并自动拨打"""
         try:
             await asyncio.sleep(3)  # 等待3秒
+            
+            # 防止无限递归，最多重试10次
+            if retry_count >= 10:
+                logger.error("连续跳过无效电话号码超过10次，停止自动拨打")
+                self.is_ended = True
+                return
             
             # 原子性获取下一个电话号码
             phone_number = await self.get_next_phone_atomically()
@@ -161,13 +173,26 @@ class AicallService(BaseService):
             
             logger.info("开始自动拨打: 电话=%s, 机器ID=%s", phone_number, self.machine_id)
             
+            # 验证电话号码格式
+            if not self._is_valid_phone_number(phone_number):
+                logger.warning("电话号码格式无效，跳过: %s (重试次数: %d)", phone_number, retry_count)
+                # 递归调用获取下一个号码
+                await self.auto_call_next_phone(retry_count=retry_count + 1)
+                return
+            
             # 创建拨打电话请求
-            call_request = CallRequest(
-                phone_number=phone_number,
-                device_index=0,
-                tts_opening="",
-                custom_id= None
-            )
+            try:
+                call_request = CallRequest(
+                    phone_number=phone_number,
+                    device_index=0,
+                    tts_opening="",
+                    custom_id= None
+                )
+            except Exception as validation_error:
+                logger.error("创建CallRequest失败，电话号码格式验证错误: %s, 错误: %s", phone_number, validation_error)
+                # 递归调用获取下一个号码
+                await self.auto_call_next_phone(retry_count=retry_count + 1)
+                return
 
             self.is_ended = True
 
