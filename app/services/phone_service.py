@@ -164,7 +164,7 @@ class PhoneService(BaseService):
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))
 
                 self.call_record.call_id = on_message.uuid
-                self.call_record.instance = on_message.instance
+                self.call_record.instance = self.device_info.devices[on_message.instance].instance
 
                 tts_opening = self.call_record.tts_opening if self.call_record else ""
 
