@@ -158,7 +158,7 @@ class PhoneService(BaseService):
                 logger.info("接听事件收到，取消拨号超时定时器")
 
                 # 启动通话时长定时器（5分钟）
-                self._start_timer("call_duration", 300, "call_duration_timeout")
+                self._start_timer("call_duration", 600, "call_duration_timeout")
                 logger.info("启动通话时长定时器（5分钟）")
 
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))

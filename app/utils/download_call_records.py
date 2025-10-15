@@ -26,12 +26,11 @@ class CallRecordDownloader:
                 cr.created_at
             FROM call_records cr
             WHERE 
-                cr.created_at > '2025-10-15 14:00:00'
+                cr.created_at > '2025-10-15 16:45:00'
                 AND cr.advisor_group_id = 2
                 AND cr.cloud_url IS NOT NULL
                 AND cr.conversation_content IS NOT NULL
                 AND cr.call_quality_score > 0
-                AND cr.time_len > 20
                 AND cr.phone NOT IN ('13189300627', '18028260616', '17369322905','13302752724')
             ORDER BY cr.created_at DESC
             LIMIT :limit
