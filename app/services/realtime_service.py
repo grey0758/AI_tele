@@ -496,7 +496,7 @@ class RealtimeDialogClient:
         hello_request.extend(payload_bytes)
         assert self.ws is not None
         await self.ws.send(hello_request)
-        await asyncio.sleep(5.8)
+        await asyncio.sleep(4.3)
 
     async def chat_text_query(self, content: str) -> None:
         """发送Chat Text Query消息"""
