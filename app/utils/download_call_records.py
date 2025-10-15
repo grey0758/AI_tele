@@ -14,9 +14,10 @@ class CallRecordDownloader:
         self.db = db
         self.session = None
         
-    async def get_today_call_records(self, limit: int = 30) -> List[Dict[str, Any]]:
+    async def get_today_call_records(self, limit: int = 50) -> List[Dict[str, Any]]:
         query = text("""
             SELECT 
+                cr.id,
                 cr.phone,
                 cr.time_len,
                 cr.conversation_content,
@@ -25,10 +26,12 @@ class CallRecordDownloader:
                 cr.created_at
             FROM call_records cr
             WHERE 
-                DATE(cr.created_at) = CURDATE()
-                AND cr.call_summary IS NOT NULL
-                AND cr.call_summary != ''
+                cr.created_at > '2025-10-15 14:00:00'
                 AND cr.advisor_group_id = 2
+                AND cr.cloud_url IS NOT NULL
+                AND cr.conversation_content IS NOT NULL
+                AND cr.call_quality_score > 0
+                AND cr.time_len > 20
                 AND cr.phone NOT IN ('13189300627', '18028260616', '17369322905','13302752724')
             ORDER BY cr.created_at DESC
             LIMIT :limit
@@ -39,6 +42,7 @@ class CallRecordDownloader:
             records = []
             for row in result:
                 records.append({
+                    "id": row.id,
                     "phone": row.phone,
                     "time_len": row.time_len,
                     "conversation_content": row.conversation_content,
@@ -80,7 +84,7 @@ class CallRecordDownloader:
         safe_phone = phone.replace("+", "").replace("-", "").replace(" ", "")
         return f"{index:02d}_{safe_phone}_{timestamp}.mp3"
     
-    async def download_call_records(self, limit: int = 30, base_path: str = "./downloads") -> Dict[str, Any]:
+    async def download_call_records(self, limit: int = 40, base_path: str = "./downloads") -> Dict[str, Any]:
         try:
             logger.info("开始下载前%d条通话录音...", limit)
             
@@ -135,7 +139,7 @@ class CallRecordDownloader:
             logger.error("下载通话录音时出错: %s", e)
             return {"success": False, "message": "下载出错: %s" % str(e), "downloaded": 0}
 
-async def download_today_call_records(limit: int = 30, base_path: str = "./downloads") -> Dict[str, Any]:
+async def download_today_call_records(limit: int = 40, base_path: str = "./downloads") -> Dict[str, Any]:
     db = Database()
     try:
         await db.initialize()
@@ -147,7 +151,7 @@ async def download_today_call_records(limit: int = 30, base_path: str = "./downl
 
 if __name__ == "__main__":
     async def main():
-        result = await download_today_call_records(30)
+        result = await download_today_call_records(40)
         print(f"下载结果: {result}")
     
     asyncio.run(main())
