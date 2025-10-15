@@ -1092,12 +1092,10 @@ class RealtimeService(BaseService):
 
     def __init__(
         self,
-        event_bus: Optional[ProductionEventBus] = None,
-        redis_service: Optional[RedisService] = None,
+        event_bus: Optional[ProductionEventBus] = None
     ):
         super().__init__(event_bus=event_bus, service_name="RealtimeService")
         self.ws_config = WS_CONNECT_CONFIG
-        self.redis_service = redis_service
         self.is_running = False
         self.current_session: DialogSession | None = None
         self.call_id: str | None = None
