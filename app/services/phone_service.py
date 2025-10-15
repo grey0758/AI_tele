@@ -347,7 +347,7 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
-            asyncio.run(self.redis_service.set_device_info(device_info))
+            asyncio.run(self.emit_event(EventType.REDIS_SET_DEVICE_INFO, device_info))
 
             return {
                 "success": True,

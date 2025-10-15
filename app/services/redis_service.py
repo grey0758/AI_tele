@@ -60,7 +60,11 @@ class RedisService(BaseService):
                     "ssl_check_hostname": False
                 }
             
-            self.redis_client = await redis.from_url(redis_url, decode_responses=True, **ssl_params)
+            self.redis_client = await redis.from_url(
+                redis_url, 
+                decode_responses=True, 
+                **ssl_params
+            )
             
             # 测试连接
             assert self.redis_client is not None
@@ -103,7 +107,6 @@ class RedisService(BaseService):
         """确保 Redis 已连接"""
         if not self._initialized or not self.redis_client:
             raise RuntimeError("Redis service not initialized")
-
 
     # ==================== 设备信息管理 ====================
 
