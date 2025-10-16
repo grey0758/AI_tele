@@ -66,7 +66,7 @@ def update_csv_marking(row_index, code):
     except (FileNotFoundError, pd.errors.EmptyDataError) as e:
         print(f"更新CSV文件时出错: {e}")
 
-def make_call_request(phone_number, device_index=0):
+def make_call_request(phone_number, device_index=0, tts_opening=""):
     """发起拨打电话请求"""
     url = 'http://localhost:8020/api/v1/aicall/make_call'
     headers = {
@@ -76,7 +76,7 @@ def make_call_request(phone_number, device_index=0):
     data = {
         "phone_number": phone_number,
         "device_index": device_index,
-        "tts_opening": "你好老板，我是广州大麦的月月，我们在寻找联合运营的合作伙伴，共同投入共同分成的方式，问您目前有考虑联合运营的需求吗？ ",
+        "tts_opening": tts_opening,
         "custom_id": None
     }
     

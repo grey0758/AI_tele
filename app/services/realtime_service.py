@@ -608,7 +608,7 @@ class RealtimeDialogClient:
     async def say_hello(self) -> None:
         """发送Hello消息"""
         payload = {
-            "content": self.realtime_service.call_record.tts_opening if self.realtime_service.call_record else ""
+            "content": "你好，关于通过商业模式重构来提升生意收入的，你需要了解吗？"
         }
         hello_request = bytearray(self.generate_header())
         hello_request.extend(int(300).to_bytes(4, 'big'))
@@ -1210,4 +1210,4 @@ class DialogSession:
             logger.error("会话错误: %s", e)
         finally:
             if self.audio_device:
-                self.audio_device.cleanup()
+               self.audio_device.cleanup()
