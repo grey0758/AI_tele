@@ -169,7 +169,7 @@ class PhoneService(BaseService):
                     self.call_record.dialog_record = [
                         DialogEntry(
                             speaker="agent",
-                            content="你好，你之前有咨询过我们广州大麦的线上营销合作的，你还记得吗？",
+                            content="你好，我是广州大麦联合运营的，你有线上营销的需求吗？",
                             timestamp=datetime.now().isoformat(),
                         )
                     ]

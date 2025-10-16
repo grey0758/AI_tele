@@ -293,14 +293,14 @@ if __name__ == "__main__":
         
         result = await download_today_call_records(
             limit=200,
-            start_time="2025-10-15 07:00:00",
-            end_time="2025-10-15 23:00:00",
+            start_time="2025-10-16 07:00:00",
+            end_time="2025-10-16 23:00:00",
             advisor_group_id=2,
             check_cloud_url=True,
             check_conversation_content= None,
-            min_call_quality_score= None, # 质量评分大于0.5
-            min_time_len=20,  # 通话时长大于30秒
-            max_time_len=30,  # 通话时长小于300秒
+            min_call_quality_score= 20, # 质量评分大于0.5
+            min_time_len=None,  # 通话时长大于30秒
+            max_time_len=None,  # 通话时长小于300秒
             exclude_phones=None  # 排除指定号码
         )
         print(f"自定义筛选结果: {result}")

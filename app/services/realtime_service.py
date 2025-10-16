@@ -484,7 +484,7 @@ class RealtimeDialogClient:
     async def say_hello(self) -> None:
         """发送Hello消息"""
         payload = {
-            "content": "你好，你之前有咨询过我们广州大麦的线上营销合作的，你还记得吗？"
+            "content": "你好，我是广州大麦联合运营的，你有线上营销的需求吗？"
         }
         hello_request = bytearray(self.generate_header())
         hello_request.extend(int(300).to_bytes(4, 'big'))
@@ -496,7 +496,7 @@ class RealtimeDialogClient:
         hello_request.extend(payload_bytes)
         assert self.ws is not None
         await self.ws.send(hello_request)
-        await asyncio.sleep(4.8)
+        await asyncio.sleep(4.5)
 
     async def chat_text_query(self, content: str) -> None:
         """发送Chat Text Query消息"""
