@@ -165,13 +165,11 @@ class PhoneService(BaseService):
 
                 self.call_record.call_id = on_message.uuid
 
-                tts_opening = self.call_record.tts_opening if self.call_record else ""
-
                 if self.call_record:
                     self.call_record.dialog_record = [
                         DialogEntry(
                             speaker="agent",
-                            content=tts_opening,
+                            content="你好，你之前有咨询过我们广州大麦的线上营销合作的，你还记得吗？",
                             timestamp=datetime.now().isoformat(),
                         )
                     ]

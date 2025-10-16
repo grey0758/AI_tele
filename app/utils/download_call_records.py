@@ -14,8 +14,21 @@ class CallRecordDownloader:
         self.db = db
         self.session = None
         
-    async def get_today_call_records(self, limit: int = 50) -> List[Dict[str, Any]]:
-        query = text("""
+    async def get_call_records(
+        self, 
+        limit: int = 50,
+        start_time: str = None,
+        end_time: str = None,
+        advisor_group_id: int = None,
+        check_cloud_url: bool = None,
+        check_conversation_content: bool = None,
+        min_call_quality_score: float = None,
+        min_time_len: int = None,
+        max_time_len: int = None,
+        exclude_phones: list = None
+    ) -> List[Dict[str, Any]]:
+        # 构建基础查询
+        base_query = """
             SELECT 
                 cr.id,
                 cr.phone,
@@ -25,19 +38,74 @@ class CallRecordDownloader:
                 cr.call_quality_score,
                 cr.created_at
             FROM call_records cr
-            WHERE 
-                cr.created_at > '2025-10-15 19:00:00'
-                AND cr.advisor_group_id = 2
-                AND cr.cloud_url IS NOT NULL
-                AND cr.conversation_content IS NOT NULL
-                AND cr.call_quality_score > 0
-                AND cr.phone NOT IN ('13189300627', '18028260616', '17369322905','13302752724')
-            ORDER BY cr.created_at DESC
-            LIMIT :limit
-        """)
+            WHERE 1=1
+        """
+        
+        # 构建动态WHERE条件
+        conditions = []
+        params = {"limit": limit}
+        
+        # 时间区间筛选
+        if start_time:
+            conditions.append("cr.created_at >= :start_time")
+            params["start_time"] = start_time
+            
+        if end_time:
+            conditions.append("cr.created_at <= :end_time")
+            params["end_time"] = end_time
+            
+        # 顾问组ID筛选
+        if advisor_group_id is not None:
+            conditions.append("cr.advisor_group_id = :advisor_group_id")
+            params["advisor_group_id"] = advisor_group_id
+            
+        # 云存储URL筛选
+        if check_cloud_url is not None:
+            if check_cloud_url:
+                conditions.append("cr.cloud_url IS NOT NULL")
+            else:
+                conditions.append("cr.cloud_url IS NULL")
+                
+        # 对话内容筛选
+        if check_conversation_content is not None:
+            if check_conversation_content:
+                conditions.append("cr.conversation_content IS NOT NULL")
+            else:
+                conditions.append("cr.conversation_content IS NULL")
+                
+        # 通话质量评分筛选
+        if min_call_quality_score is not None:
+            conditions.append("cr.call_quality_score >= :min_call_quality_score")
+            params["min_call_quality_score"] = min_call_quality_score
+            
+        # 通话时长区间筛选
+        if min_time_len is not None:
+            conditions.append("cr.time_len >= :min_time_len")
+            params["min_time_len"] = min_time_len
+            
+        if max_time_len is not None:
+            conditions.append("cr.time_len <= :max_time_len")
+            params["max_time_len"] = max_time_len
+            
+        # 排除指定电话号码
+        if exclude_phones and len(exclude_phones) > 0:
+            placeholders = ", ".join([f":exclude_phone_{i}" for i in range(len(exclude_phones))])
+            conditions.append(f"cr.phone NOT IN ({placeholders})")
+            for i, phone in enumerate(exclude_phones):
+                params[f"exclude_phone_{i}"] = phone
+        
+        # 组合查询
+        if conditions:
+            where_clause = " AND " + " AND ".join(conditions)
+        else:
+            where_clause = ""
+            
+        full_query = base_query + where_clause + " ORDER BY cr.created_at DESC LIMIT :limit"
+        
+        query = text(full_query)
         
         async with self.db.get_session() as session:
-            result = await session.execute(query, {"limit": limit})
+            result = await session.execute(query, params)
             records = []
             for row in result:
                 records.append({
@@ -50,6 +118,21 @@ class CallRecordDownloader:
                     "created_at": row.created_at
                 })
             return records
+    
+    async def get_today_call_records(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """获取今天的通话记录（向后兼容方法）"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        return await self.get_call_records(
+            limit=limit,
+            start_time=f"{today} 00:00:00",
+            end_time=f"{today} 23:59:59",
+            advisor_group_id=2,
+            check_cloud_url=True,
+            check_conversation_content=True,
+            min_call_quality_score=0,
+            min_time_len=20,
+            exclude_phones=['13189300627', '18028260616', '17369322905', '13302752724']
+        )
     
     def download_audio_file(self, url: str, file_path: str) -> bool:
         try:
@@ -83,11 +166,41 @@ class CallRecordDownloader:
         safe_phone = phone.replace("+", "").replace("-", "").replace(" ", "")
         return f"{index:02d}_{safe_phone}_{timestamp}.mp3"
     
-    async def download_call_records(self, limit: int = 40, base_path: str = "./downloads") -> Dict[str, Any]:
+    async def download_call_records(
+        self, 
+        limit: int = 40, 
+        base_path: str = "./downloads",
+        start_time: str = None,
+        end_time: str = None,
+        advisor_group_id: int = None,
+        check_cloud_url: bool = None,
+        check_conversation_content: bool = None,
+        min_call_quality_score: float = None,
+        min_time_len: int = None,
+        max_time_len: int = None,
+        exclude_phones: list = None
+    ) -> Dict[str, Any]:
         try:
             logger.info("开始下载前%d条通话录音...", limit)
             
-            records = await self.get_today_call_records(limit)
+            # 如果提供了自定义参数，使用新的查询方法；否则使用默认的今天记录方法
+            if any([start_time, end_time, advisor_group_id is not None, check_cloud_url is not None, 
+                   check_conversation_content is not None, min_call_quality_score is not None,
+                   min_time_len is not None, max_time_len is not None, exclude_phones]):
+                records = await self.get_call_records(
+                    limit=limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    advisor_group_id=advisor_group_id,
+                    check_cloud_url=check_cloud_url,
+                    check_conversation_content=check_conversation_content,
+                    min_call_quality_score=min_call_quality_score,
+                    min_time_len=min_time_len,
+                    max_time_len=max_time_len,
+                    exclude_phones=exclude_phones
+                )
+            else:
+                records = await self.get_today_call_records(limit)
             if not records:
                 logger.warning("没有找到符合条件的通话记录")
                 return {"success": False, "message": "没有找到符合条件的通话记录", "downloaded": 0}
@@ -138,19 +251,58 @@ class CallRecordDownloader:
             logger.error("下载通话录音时出错: %s", e)
             return {"success": False, "message": "下载出错: %s" % str(e), "downloaded": 0}
 
-async def download_today_call_records(limit: int = 40, base_path: str = "./downloads") -> Dict[str, Any]:
+async def download_today_call_records(
+    limit: int = 40, 
+    base_path: str = "./downloads",
+    start_time: str = None,
+    end_time: str = None,
+    advisor_group_id: int = None,
+    check_cloud_url: bool = None,
+    check_conversation_content: bool = None,
+    min_call_quality_score: float = None,
+    min_time_len: int = None,
+    max_time_len: int = None,
+    exclude_phones: list = None
+) -> Dict[str, Any]:
     db = Database()
     try:
         await db.initialize()
         downloader = CallRecordDownloader(db)
-        result = await downloader.download_call_records(limit, base_path)
+        result = await downloader.download_call_records(
+            limit=limit,
+            base_path=base_path,
+            start_time=start_time,
+            end_time=end_time,
+            advisor_group_id=advisor_group_id,
+            check_cloud_url=check_cloud_url,
+            check_conversation_content=check_conversation_content,
+            min_call_quality_score=min_call_quality_score,
+            min_time_len=min_time_len,
+            max_time_len=max_time_len,
+            exclude_phones=exclude_phones
+        )
         return result
     finally:
         await db.close()
 
 if __name__ == "__main__":
     async def main():
-        result = await download_today_call_records(40)
-        print(f"下载结果: {result}")
+        # 示例1: 使用默认参数（今天的记录）
+        # result = await download_today_call_records(40)
+        # print(f"下载结果: {result}")
+        
+        result = await download_today_call_records(
+            limit=200,
+            start_time="2025-10-15 07:00:00",
+            end_time="2025-10-15 23:00:00",
+            advisor_group_id=2,
+            check_cloud_url=True,
+            check_conversation_content= None,
+            min_call_quality_score= None, # 质量评分大于0.5
+            min_time_len=20,  # 通话时长大于30秒
+            max_time_len=30,  # 通话时长小于300秒
+            exclude_phones=None  # 排除指定号码
+        )
+        print(f"自定义筛选结果: {result}")
     
     asyncio.run(main())
