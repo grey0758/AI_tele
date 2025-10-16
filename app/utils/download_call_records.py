@@ -26,7 +26,7 @@ class CallRecordDownloader:
                 cr.created_at
             FROM call_records cr
             WHERE 
-                cr.created_at > '2025-10-15 16:45:00'
+                cr.created_at > '2025-10-15 19:00:00'
                 AND cr.advisor_group_id = 2
                 AND cr.cloud_url IS NOT NULL
                 AND cr.conversation_content IS NOT NULL
