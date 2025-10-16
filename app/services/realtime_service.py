@@ -606,6 +606,7 @@ class RealtimeDialogClient:
 
     async def say_hello(self) -> None:
         """发送Hello消息"""
+        logger.info("发送Hello消息: %s", self.realtime_service.call_record)
         payload = {
             "content": self.realtime_service.call_record.tts_opening 
         }
