@@ -161,18 +161,18 @@ class PhoneService(BaseService):
                 self._start_timer("call_duration", 600, "call_duration_timeout")
                 logger.info("启动通话时长定时器（5分钟）")
 
-                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, on_message))
-
                 self.call_record.call_id = on_message.uuid
 
                 if self.call_record:
                     self.call_record.dialog_record = [
                         DialogEntry(
                             speaker="agent",
-                            content="你好，我是广州大麦联合运营的，你有线上营销的需求吗？",
+                            content=self.call_record.tts_opening if self.call_record else "",
                             timestamp=datetime.now().isoformat(),
                         )
                     ]
+                
+                asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONANSWER, self.call_record))
 
             elif notify_type == "OnCallOut":
                 # 处理呼出事件

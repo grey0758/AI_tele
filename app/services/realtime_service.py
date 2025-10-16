@@ -16,9 +16,8 @@ from app.core.event_bus import ProductionEventBus
 from app.services.phone_service import OnMessageType
 from app.core.logger import get_logger
 from app.services.base_service import BaseService
-from app.services.redis_service import RedisService
 from app.models.events import Event, EventType
-from app.models.call_record import DialogEntry
+from app.models.call_record import DialogEntry, CallRecord  
 
 
 logger = get_logger(__name__)
@@ -418,11 +417,136 @@ class AudioDeviceManager:
             except Exception as e:
                 logger.warning("终止PyAudio时出错: %s", e)
 
+class RealtimeService(BaseService):
+    """实时服务"""
+
+    def __init__(
+        self,
+        event_bus: Optional[ProductionEventBus] = None
+    ):
+        super().__init__(event_bus=event_bus, service_name="RealtimeService")
+        self.ws_config = WS_CONNECT_CONFIG
+        self.is_running = False
+        self.current_session: DialogSession | None = None
+        self.call_record: CallRecord | None = None
+    async def initialize(self) -> bool:
+        """初始化实时服务"""
+        try:
+            logger.info("RealtimeService initialized successfully")
+            return True
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("RealtimeService initialization failed: %s", e)
+            return False
+
+    async def register_event_listeners(self):
+        """注册事件监听器"""
+        await self._register_listener(EventType.PHONE_SERVICE_ONANSWER, self.handle_realtime_start)
+        await self._register_listener(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, self.handle_realtime_stop)
+
+    async def main(
+        self,
+        audio_format: str = "pcm",
+        recv_timeout: int = 10,
+    ) -> None:
+        """启动实时对话会话"""
+        try:
+            session = DialogSession(
+                ws_config=self.ws_config,
+                output_audio_format=audio_format,
+                recv_timeout=recv_timeout,
+                realtime_service=self,
+            )
+            await session.start()
+            self.stats["total_processed"] += 1
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Error in realtime dialog: %s", e)
+            self.stats["total_failed"] += 1
+            raise
+
+    async def start_realtime_dialog(self, audio_format: str = "pcm", recv_timeout: int = 10) -> None:
+        """启动实时对话的便捷方法"""
+        await self.main(audio_format, recv_timeout)
+
+    async def handle_realtime_start(self, event: Event | None = None) -> bool:
+        """处理实时服务启动事件"""
+        try:
+            if self.is_running:
+                logger.warning("RealtimeService is already running")
+                return False
+
+            assert event is not None and event.data is not None and isinstance(event.data, CallRecord)
+            self.call_record = event.data
+
+            audio_format = "pcm"
+            recv_timeout = 10
+
+            logger.info(
+                "Starting realtime service with default params: format=%s",
+                audio_format,
+            )
+
+            # 创建会话并启动实时对话
+            self.current_session = DialogSession(
+                ws_config=self.ws_config,
+                output_audio_format=audio_format,
+                recv_timeout=recv_timeout,
+                realtime_service=self,
+            )
+
+            asyncio.create_task(self.current_session.start())
+
+            self.is_running = True
+            self.stats["total_processed"] += 1
+
+            return True
+
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Error starting realtime service: %s", e)
+            self.stats["total_failed"] += 1
+            return False
+
+    async def handle_realtime_stop(self, _: Event | None = None) -> bool:
+        """处理实时服务停止事件"""
+        try:
+            if not self.is_running:
+                logger.warning("RealtimeService is not running")
+                return False
+
+            logger.info("Stopping realtime service")
+
+            # 实际停止当前会话
+            if self.current_session:
+                try:
+                    # 调用会话的停止方法
+                    self.current_session.stop()
+                    logger.info("Dialog session stopped successfully")
+                except Exception as e: # pylint: disable=broad-except
+                    logger.error("Error stopping dialog session: %s", e)
+                finally:
+                    self.current_session = None
+
+            self.is_running = False
+
+            return True
+
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Error stopping realtime service: %s", e)
+            self.stats["total_failed"] += 1
+            return False
+
+    async def health_check(self) -> Dict[str, Any]:
+        """健康检查"""
+        base_health = await super().health_check()
+        return {
+            **base_health,
+            "is_running": self.is_running,
+            "ws_config_available": self.ws_config is not None,
+        }
 
 class RealtimeDialogClient:
     """实时对话客户端"""
     def __init__(self, config: Dict[str, Any], session_id: str, output_audio_format: str = "pcm",
-                 mod: str = "audio", recv_timeout: int = 10) -> None:
+                 mod: str = "audio", recv_timeout: int = 10, realtime_service : RealtimeService = None) -> None:
         self.config = config
         self.logid = ""
         self.session_id = session_id
@@ -430,7 +554,7 @@ class RealtimeDialogClient:
         self.mod = mod
         self.recv_timeout = recv_timeout
         self.ws: websockets.ClientConnection | None = None
-
+        self.realtime_service = realtime_service
     async def connect(self) -> None:
         """建立WebSocket连接"""
         logger.info("连接WebSocket服务器...")
@@ -484,7 +608,7 @@ class RealtimeDialogClient:
     async def say_hello(self) -> None:
         """发送Hello消息"""
         payload = {
-            "content": "你好，我是广州大麦联合运营的，你有线上营销的需求吗？"
+            "content": self.realtime_service.call_record.tts_opening if self.realtime_service.call_record else ""
         }
         hello_request = bytearray(self.generate_header())
         hello_request.extend(int(300).to_bytes(4, 'big'))
@@ -496,7 +620,7 @@ class RealtimeDialogClient:
         hello_request.extend(payload_bytes)
         assert self.ws is not None
         await self.ws.send(hello_request)
-        await asyncio.sleep(4.5)
+        await asyncio.sleep(4.7)
 
     async def chat_text_query(self, content: str) -> None:
         """发送Chat Text Query消息"""
@@ -717,7 +841,7 @@ class DialogSession:
     """对话会话管理类"""
     mod: str
 
-    def __init__(self, ws_config: Dict[str, Any], output_audio_format: str = "pcm", recv_timeout: int = 10, realtime_service: Optional['RealtimeService'] = None):
+    def __init__(self, ws_config: Dict[str, Any], output_audio_format: str = "pcm", recv_timeout: int = 10, realtime_service: RealtimeService = None):
         self.recv_timeout = recv_timeout
         self.mod = "audio"
 
@@ -823,7 +947,7 @@ class DialogSession:
     async def _add_dialog_entry(self, speaker: str, content: str) -> None:
         """添加对话记录"""
         logger.debug("Adding dialog entry: %s", content)
-        logger.debug("realtime_service: %s, call_id: %s", self.realtime_service, self.realtime_service.call_id if self.realtime_service else None)
+        logger.debug("realtime_service: %s, call_id: %s", self.realtime_service, self.realtime_service.call_record.call_id if self.realtime_service.call_record else None)
         if self.realtime_service and content.strip():
             try:
                 dialog_entry = DialogEntry(
@@ -831,7 +955,7 @@ class DialogSession:
                     content=content,
                     timestamp=datetime.now()
                 )
-                logger.debug("Emitting PHONE_SERVICE_ADD_DIALOG_ENTRY event for call_id: %s", self.realtime_service.call_id)
+                logger.debug("Emitting PHONE_SERVICE_ADD_DIALOG_ENTRY event for call_id: %s", self.realtime_service.call_record.call_id)
                 await self.realtime_service.emit_event(EventType.PHONE_SERVICE_ADD_DIALOG_ENTRY, {"dialog_entry": dialog_entry})
             except Exception as e: # pylint: disable=broad-except
                 logger.error("Failed to add dialog entry: %s", e)
@@ -1087,132 +1211,3 @@ class DialogSession:
         finally:
             if self.audio_device:
                 self.audio_device.cleanup()
-
-class RealtimeService(BaseService):
-    """实时服务"""
-
-    def __init__(
-        self,
-        event_bus: Optional[ProductionEventBus] = None
-    ):
-        super().__init__(event_bus=event_bus, service_name="RealtimeService")
-        self.ws_config = WS_CONNECT_CONFIG
-        self.is_running = False
-        self.current_session: DialogSession | None = None
-        self.call_id: str | None = None
-
-    async def initialize(self) -> bool:
-        """初始化实时服务"""
-        try:
-            logger.info("RealtimeService initialized successfully")
-            return True
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("RealtimeService initialization failed: %s", e)
-            return False
-
-    async def register_event_listeners(self):
-        """注册事件监听器"""
-        await self._register_listener(EventType.PHONE_SERVICE_ONANSWER, self.handle_realtime_start)
-        await self._register_listener(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, self.handle_realtime_stop)
-
-    async def main(
-        self,
-        audio_format: str = "pcm",
-        recv_timeout: int = 10,
-    ) -> None:
-        """启动实时对话会话"""
-        try:
-            session = DialogSession(
-                ws_config=self.ws_config,
-                output_audio_format=audio_format,
-                recv_timeout=recv_timeout,
-                realtime_service=self,
-            )
-            await session.start()
-            self.stats["total_processed"] += 1
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error in realtime dialog: %s", e)
-            self.stats["total_failed"] += 1
-            raise
-
-    async def start_realtime_dialog(self, audio_format: str = "pcm", recv_timeout: int = 10) -> None:
-        """启动实时对话的便捷方法"""
-        await self.main(audio_format, recv_timeout)
-
-    async def handle_realtime_start(self, event: Event | None = None) -> bool:
-        """处理实时服务启动事件"""
-        try:
-            if self.is_running:
-                logger.warning("RealtimeService is already running")
-                return False
-
-            assert event is not None and event.data is not None
-            on_message : OnMessageType = event.data
-
-            self.call_id = on_message.uuid
-
-            audio_format = "pcm"
-            recv_timeout = 10
-
-            logger.info(
-                "Starting realtime service with default params: format=%s",
-                audio_format,
-            )
-
-            # 创建会话并启动实时对话
-            self.current_session = DialogSession(
-                ws_config=self.ws_config,
-                output_audio_format=audio_format,
-                recv_timeout=recv_timeout,
-                realtime_service=self,
-            )
-
-            asyncio.create_task(self.current_session.start())
-
-            self.is_running = True
-            self.stats["total_processed"] += 1
-
-            return True
-
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error starting realtime service: %s", e)
-            self.stats["total_failed"] += 1
-            return False
-
-    async def handle_realtime_stop(self, _: Event | None = None) -> bool:
-        """处理实时服务停止事件"""
-        try:
-            if not self.is_running:
-                logger.warning("RealtimeService is not running")
-                return False
-
-            logger.info("Stopping realtime service")
-
-            # 实际停止当前会话
-            if self.current_session:
-                try:
-                    # 调用会话的停止方法
-                    self.current_session.stop()
-                    logger.info("Dialog session stopped successfully")
-                except Exception as e: # pylint: disable=broad-except
-                    logger.error("Error stopping dialog session: %s", e)
-                finally:
-                    self.current_session = None
-
-            self.is_running = False
-
-            return True
-
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error stopping realtime service: %s", e)
-            self.stats["total_failed"] += 1
-            return False
-
-    async def health_check(self) -> Dict[str, Any]:
-        """健康检查"""
-        base_health = await super().health_check()
-        return {
-            **base_health,
-            "is_running": self.is_running,
-            "ws_config_available": self.ws_config is not None,
-        }

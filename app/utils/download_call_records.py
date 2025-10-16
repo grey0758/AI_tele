@@ -293,8 +293,8 @@ if __name__ == "__main__":
         
         result = await download_today_call_records(
             limit=200,
-            start_time="2025-10-16 07:00:00",
-            end_time="2025-10-16 23:00:00",
+            start_time="2025-10-16 11:00:00",
+            end_time="2025-10-16 12:00:00",
             advisor_group_id=2,
             check_cloud_url=True,
             check_conversation_content= None,

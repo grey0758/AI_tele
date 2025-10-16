@@ -29,6 +29,7 @@ class AicallService(BaseService):
         self.db = db
         self.is_ended = True  # 是否通话结束
         self.machine_id = f"machine_{id(self)}"  # 机器标识符
+        self.tts_opening = ""
 
     async def initialize(self) -> bool:
         """初始化"""
@@ -59,6 +60,8 @@ class AicallService(BaseService):
             logger.info(
                 "Starting call to %s with TTS opening...", call_request.phone_number
             )
+
+            self.tts_opening = call_request.tts_opening
 
             call_record = CallRecord(
                 **call_request.model_dump(),
@@ -185,7 +188,7 @@ class AicallService(BaseService):
                 call_request = CallRequest(
                     phone_number=phone_number,
                     device_index=0,
-                    tts_opening="",
+                    tts_opening=self.tts_opening,
                     custom_id= None
                 )
             except Exception as validation_error:
