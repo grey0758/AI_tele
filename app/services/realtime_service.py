@@ -545,7 +545,7 @@ class RealtimeService(BaseService):
 class RealtimeDialogClient:
     """实时对话客户端"""
     def __init__(self, config: Dict[str, Any], session_id: str, output_audio_format: str = "pcm",
-                 mod: str = "audio", recv_timeout: int = 10, realtime_service : RealtimeService = None) -> None:
+                 mod: str = "audio", recv_timeout: int = 10, realtime_service : RealtimeService | None = None) -> None:
         self.config = config
         self.logid = ""
         self.session_id = session_id
@@ -848,7 +848,7 @@ class DialogSession:
         self.session_id = str(uuid.uuid4())
         self.realtime_service = realtime_service
         self.client = RealtimeDialogClient(config=ws_config, session_id=self.session_id,
-                                           output_audio_format=output_audio_format, mod=self.mod, recv_timeout=recv_timeout)
+                                           output_audio_format=output_audio_format, mod=self.mod, recv_timeout=recv_timeout, realtime_service=self.realtime_service)
         if output_audio_format == "pcm_s16le":
             OUTPUT_AUDIO_CONFIG["format"] = "pcm_s16le"
             OUTPUT_AUDIO_CONFIG["bit_size"] = pyaudio.paInt16
