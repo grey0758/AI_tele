@@ -14,7 +14,8 @@ from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
 from app.services.redis_service import RedisService
 from app.db.database import Database
-from app.models.phone_call_queue import PhoneCallQueue
+from app.models.phone_call_queue import PhoneCallQueue, PhoneCallQueueCopy1
+from app.core.config import settings
 
 
 logger = get_logger(__name__)
@@ -89,6 +90,13 @@ class AicallService(BaseService):
         # 匹配11位手机号，以1开头，第二位是3-9
         pattern = r'^1[3-9]\d{9}$'
         return bool(re.match(pattern, phone_number))
+    
+    def _get_queue_model(self):
+        """根据配置获取正确的队列表模型"""
+        if settings.character_manifest_type == "ai_tele":
+            return PhoneCallQueueCopy1
+        else:
+            return PhoneCallQueue
 
     async def get_next_phone_atomically(self) -> str | None:
         """
@@ -103,31 +111,35 @@ class AicallService(BaseService):
             return None
             
         try:
+            # 获取正确的表模型
+            QueueModel = self._get_queue_model()
+            table_name = QueueModel.__tablename__
+            
             async with self.db.get_session() as session:
                 # 先检查数据库中的总记录数和可用记录数
-                total_stmt = select(PhoneCallQueue)
+                total_stmt = select(QueueModel)
                 total_result = await session.execute(total_stmt)
                 total_records = total_result.scalars().all()
                 
-                available_stmt = select(PhoneCallQueue).where(PhoneCallQueue.is_called == false()) # pylint: disable=not-callable
+                available_stmt = select(QueueModel).where(QueueModel.is_called == false()) # pylint: disable=not-callable
                 available_result = await session.execute(available_stmt)
                 available_records = available_result.scalars().all()
                 
-                logger.info("数据库状态检查 - 总记录数: %d, 可用记录数: %d", len(total_records), len(available_records))
+                logger.info("数据库状态检查 [%s] - 总记录数: %d, 可用记录数: %d", table_name, len(total_records), len(available_records))
                 
                 if len(total_records) == 0:
-                    logger.warning("数据库中没有任何电话号码记录")
+                    logger.warning("数据库表 [%s] 中没有任何电话号码记录", table_name)
                     return None
                 
                 if len(available_records) == 0:
-                    logger.warning("所有电话号码都已被拨打")
+                    logger.warning("数据库表 [%s] 中所有电话号码都已被拨打", table_name)
                     return None
                 
                 # 使用SELECT ... FOR UPDATE锁定行，确保原子性
                 stmt = (
-                    select(PhoneCallQueue)
-                    .where(PhoneCallQueue.is_called == false()) # pylint: disable=not-callable
-                    .order_by(PhoneCallQueue.created_at.asc())
+                    select(QueueModel)
+                    .where(QueueModel.is_called == false()) # pylint: disable=not-callable
+                    .order_by(QueueModel.created_at.asc())
                     .limit(1)
                     .with_for_update(skip_locked=True)  # 跳过已被锁定的行
                 )
@@ -136,7 +148,7 @@ class AicallService(BaseService):
                 phone_record = result.scalar_one_or_none()
                 
                 if not phone_record:
-                    logger.info("没有可用的电话号码，机器ID: %s", self.machine_id)
+                    logger.info("没有可用的电话号码，机器ID: %s, 表: %s", self.machine_id, table_name)
                     return None
                 
                 # 立即标记为已拨打，防止其他机器获取
@@ -146,8 +158,8 @@ class AicallService(BaseService):
                 await session.commit()
                 
                 logger.info(
-                    "成功获取电话号码: %s, 机器ID: %s, 记录ID: %s", 
-                    phone_record.phone, self.machine_id, phone_record.id
+                    "成功获取电话号码: %s, 机器ID: %s, 记录ID: %s, 表: %s", 
+                    phone_record.phone, self.machine_id, phone_record.id, table_name
                 )
                 
                 return phone_record.phone
@@ -220,4 +232,35 @@ class AicallService(BaseService):
             
         except Exception as e:  # pylint: disable=broad-except
             logger.error("启动自动拨打失败: %s", e)
+            return False
+    
+    async def reset_all_called_status(self) -> bool:
+        """重置所有已打状态为未打状态"""
+        if not self.db:
+            logger.error("数据库连接未初始化")
+            return False
+            
+        try:
+            # 获取正确的表模型
+            QueueModel = self._get_queue_model()
+            table_name = QueueModel.__tablename__
+            
+            async with self.db.get_session() as session:
+                # 重置所有已打状态
+                from sqlalchemy import update
+                stmt = update(QueueModel).values(
+                    is_called=False,
+                    updated_at=datetime.now()
+                )
+                
+                result = await session.execute(stmt)
+                await session.commit()
+                
+                affected_rows = result.rowcount
+                logger.info("成功重置表 [%s] 中 %d 条记录的已打状态", table_name, affected_rows)
+                
+                return True
+                
+        except Exception as e:
+            logger.error("重置已打状态失败，表: %s, 错误: %s", table_name, e)
             return False

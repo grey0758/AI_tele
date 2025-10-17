@@ -302,12 +302,12 @@ if __name__ == "__main__":
         
         result = await download_today_call_records(
             limit=200,
-            start_time="2025-10-17 11:40:00",
-            end_time="2025-10-17 13:00:00",
+            start_time="2025-10-17 13:00:00",
+            end_time="2025-10-17 16:00:00",
             advisor_group_id=2,
             check_cloud_url=True,
             check_conversation_content= None,
-            min_call_quality_score= 20, # 质量评分大于0.5
+            min_call_quality_score= 19, # 质量评分大于0.5
             min_time_len=None,  # 通话时长大于30秒
             max_time_len=None,  # 通话时长小于300秒
             exclude_phones=None  # 排除指定号码

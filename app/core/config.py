@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     #ai tele record service
     ai_tele_record_service_url: str = Field(default="http://localhost:8081", description="AI Tele record service URL")
 
+    # Character Manifest Configuration
+    character_manifest_type: str = Field(default="default", description="Character manifest type: 'default' or 'ai_tele'")
+
     model_config = SettingsConfigDict(env_file=".env", arbitrary_types_allowed=True)
 
 settings = Settings()

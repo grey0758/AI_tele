@@ -22,3 +22,23 @@ class PhoneCallQueue(Base):
         UniqueConstraint('phone', name='uk_phone'),
         {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
     )
+
+
+class PhoneCallQueueCopy1(Base):
+    """电话待打表复制表模型 - 用于AI_TELE角色"""
+    
+    __tablename__ = "phone_call_queue_copy1"
+    
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
+    phone: Mapped[str] = mapped_column(String(20), nullable=False, comment="电话号码")
+    is_called: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否已经拨打：TRUE=已拨打，FALSE=未拨打")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), comment="创建时间")  # pylint: disable=not-callable
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")  # pylint: disable=not-callable
+    
+    __table_args__ = (
+        Index('idx_phone_copy1', 'phone'),
+        Index('idx_is_called_copy1', 'is_called'),
+        Index('idx_created_at_copy1', 'created_at'),
+        UniqueConstraint('phone', name='uk_phone_copy1'),
+        {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+    )
