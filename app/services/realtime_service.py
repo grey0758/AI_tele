@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 
 def get_character_manifest():
     """根据配置获取角色配置"""
+    logger.warning("使用角色配置: %s", settings.character_manifest_type)
     if settings.character_manifest_type == "ai_tele":
         logger.warning("使用AI_TELE角色配置")
         return CHARACTER_MANIFEST_AI_TELE
