@@ -1,8 +1,9 @@
+"""下载通话记录"""
 import os
 import asyncio
-import requests
 from datetime import datetime, date
 from typing import List, Dict, Any
+import requests
 from sqlalchemy import text
 from app.db.database import Database
 from app.core.logger import get_logger
@@ -10,6 +11,7 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 
 class CallRecordDownloader:
+    """通话记录下载器"""
     def __init__(self, db: Database):
         self.db = db
         self.session = None
@@ -27,6 +29,7 @@ class CallRecordDownloader:
         max_time_len: int = None,
         exclude_phones: list = None
     ) -> List[Dict[str, Any]]:
+        """获取通话记录"""
         # 构建基础查询
         base_query = """
             SELECT 
@@ -135,6 +138,7 @@ class CallRecordDownloader:
         )
     
     def download_audio_file(self, url: str, file_path: str) -> bool:
+        """下载音频文件"""
         try:
             response = requests.get(url, stream=True, timeout=30)
             if response.status_code == 200:
@@ -151,6 +155,7 @@ class CallRecordDownloader:
             return False
     
     def create_download_folder(self, base_path: str = "./downloads") -> str:
+        """创建下载文件夹"""
         today = date.today().strftime("%Y%m%d")
         folder_name = f"call_records_{today}"
         folder_path = os.path.join(base_path, folder_name)
@@ -162,6 +167,7 @@ class CallRecordDownloader:
         return folder_path
     
     def get_safe_filename(self, phone: str, created_at: datetime, index: int) -> str:
+        """获取安全文件名"""
         timestamp = created_at.strftime("%Y%m%d_%H%M%S")
         safe_phone = phone.replace("+", "").replace("-", "").replace(" ", "")
         return f"{index:02d}_{safe_phone}_{timestamp}.mp3"
@@ -180,6 +186,7 @@ class CallRecordDownloader:
         max_time_len: int = None,
         exclude_phones: list = None
     ) -> Dict[str, Any]:
+        """下载通话记录"""
         try:
             logger.info("开始下载前%d条通话录音...", limit)
             
@@ -237,7 +244,7 @@ class CallRecordDownloader:
             
             result = {
                 "success": True,
-                "message": "下载完成，成功: %d, 失败: %d" % (downloaded_count, failed_count),
+                "message": f"下载完成，成功: {downloaded_count}, 失败: {failed_count}",
                 "downloaded": downloaded_count,
                 "failed": failed_count,
                 "folder_path": folder_path,
@@ -249,7 +256,7 @@ class CallRecordDownloader:
             
         except Exception as e:
             logger.error("下载通话录音时出错: %s", e)
-            return {"success": False, "message": "下载出错: %s" % str(e), "downloaded": 0}
+            return {"success": False, "message": f"下载出错: {str(e)}", "downloaded": 0}
 
 async def download_today_call_records(
     limit: int = 40, 
@@ -264,6 +271,7 @@ async def download_today_call_records(
     max_time_len: int = None,
     exclude_phones: list = None
 ) -> Dict[str, Any]:
+    """下载通话记录"""
     db = Database()
     try:
         await db.initialize()
@@ -287,14 +295,15 @@ async def download_today_call_records(
 
 if __name__ == "__main__":
     async def main():
+        """主函数"""
         # 示例1: 使用默认参数（今天的记录）
         # result = await download_today_call_records(40)
         # print(f"下载结果: {result}")
         
         result = await download_today_call_records(
             limit=200,
-            start_time="2025-10-16 16:00:00",
-            end_time="2025-10-16 18:00:00",
+            start_time="2025-10-17 11:40:00",
+            end_time="2025-10-17 13:00:00",
             advisor_group_id=2,
             check_cloud_url=True,
             check_conversation_content= None,

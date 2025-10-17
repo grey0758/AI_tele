@@ -190,6 +190,7 @@ class PhoneService(BaseService):
                     agent_hang_up = True
                 self._cancel_timer("call_duration")
                 logger.info("挂断事件收到，取消通话时长定时器")
+                asyncio.run(self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_record.call_id, "instance": self.call_record.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)
@@ -365,11 +366,10 @@ class PhoneService(BaseService):
             logger.warning("Call record not found for call_id: %s dialog_entry: %s", self.call_record.call_id, event.data.get("dialog_entry"))
             
 
-    async def _call_finished(self, _: Event = None):
+    async def _call_finished(self, _: Event | None = None):
         """通话结束"""
         self.call_finished = True
 
-        await self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record)
         await self.emit_event(EventType.REALTIME_SERVICE_ONHANGUP_AUTO_CALL, wait_for_result=True)
         await self.emit_event(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL)
 

@@ -1210,4 +1210,4 @@ class DialogSession:
             logger.error("会话错误: %s", e)
         finally:
             if self.audio_device:
-               self.audio_device.cleanup()
+                self.audio_device.cleanup()
