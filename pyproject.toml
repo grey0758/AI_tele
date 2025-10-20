@@ -25,7 +25,6 @@ dependencies = [
     # 配置和环境
     "python-dotenv",
     # 远程连接
-    "asyncssh",
     "websocket-client",
     # 缓存
     "redis[hiredis]>=5.0.0",

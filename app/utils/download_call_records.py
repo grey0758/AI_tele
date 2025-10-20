@@ -22,6 +22,7 @@ class CallRecordDownloader:
         start_time: str = None,
         end_time: str = None,
         advisor_group_id: int = None,
+        advisor_id: list = None,
         check_cloud_url: bool = None,
         check_conversation_content: bool = None,
         min_call_quality_score: float = None,
@@ -61,6 +62,13 @@ class CallRecordDownloader:
         if advisor_group_id is not None:
             conditions.append("cr.advisor_group_id = :advisor_group_id")
             params["advisor_group_id"] = advisor_group_id
+            
+        # 顾问ID筛选
+        if advisor_id is not None and len(advisor_id) > 0:
+            placeholders = ", ".join([f":advisor_id_{i}" for i in range(len(advisor_id))])
+            conditions.append(f"cr.advisor_id IN ({placeholders})")
+            for i, aid in enumerate(advisor_id):
+                params[f"advisor_id_{i}"] = aid
             
         # 云存储URL筛选
         if check_cloud_url is not None:
@@ -122,7 +130,7 @@ class CallRecordDownloader:
                 })
             return records
     
-    async def get_today_call_records(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_today_call_records(self, limit: int = 50, advisor_id: int = None) -> List[Dict[str, Any]]:
         """获取今天的通话记录（向后兼容方法）"""
         today = datetime.now().strftime("%Y-%m-%d")
         return await self.get_call_records(
@@ -130,6 +138,7 @@ class CallRecordDownloader:
             start_time=f"{today} 00:00:00",
             end_time=f"{today} 23:59:59",
             advisor_group_id=2,
+            advisor_id=advisor_id,
             check_cloud_url=True,
             check_conversation_content=True,
             min_call_quality_score=0,
@@ -179,6 +188,7 @@ class CallRecordDownloader:
         start_time: str = None,
         end_time: str = None,
         advisor_group_id: int = None,
+        advisor_id: list = None,
         check_cloud_url: bool = None,
         check_conversation_content: bool = None,
         min_call_quality_score: float = None,
@@ -191,14 +201,16 @@ class CallRecordDownloader:
             logger.info("开始下载前%d条通话录音...", limit)
             
             # 如果提供了自定义参数，使用新的查询方法；否则使用默认的今天记录方法
-            if any([start_time, end_time, advisor_group_id is not None, check_cloud_url is not None, 
-                   check_conversation_content is not None, min_call_quality_score is not None,
-                   min_time_len is not None, max_time_len is not None, exclude_phones]):
+            if any([start_time, end_time, advisor_group_id is not None, advisor_id is not None, 
+                   check_cloud_url is not None, check_conversation_content is not None, 
+                   min_call_quality_score is not None, min_time_len is not None, 
+                   max_time_len is not None, exclude_phones]):
                 records = await self.get_call_records(
                     limit=limit,
                     start_time=start_time,
                     end_time=end_time,
                     advisor_group_id=advisor_group_id,
+                    advisor_id=advisor_id,
                     check_cloud_url=check_cloud_url,
                     check_conversation_content=check_conversation_content,
                     min_call_quality_score=min_call_quality_score,
@@ -207,7 +219,7 @@ class CallRecordDownloader:
                     exclude_phones=exclude_phones
                 )
             else:
-                records = await self.get_today_call_records(limit)
+                records = await self.get_today_call_records(limit, advisor_id)
             if not records:
                 logger.warning("没有找到符合条件的通话记录")
                 return {"success": False, "message": "没有找到符合条件的通话记录", "downloaded": 0}
@@ -264,6 +276,7 @@ async def download_today_call_records(
     start_time: str = None,
     end_time: str = None,
     advisor_group_id: int = None,
+    advisor_id: int = None,
     check_cloud_url: bool = None,
     check_conversation_content: bool = None,
     min_call_quality_score: float = None,
@@ -282,6 +295,7 @@ async def download_today_call_records(
             start_time=start_time,
             end_time=end_time,
             advisor_group_id=advisor_group_id,
+            advisor_id=advisor_id,
             check_cloud_url=check_cloud_url,
             check_conversation_content=check_conversation_content,
             min_call_quality_score=min_call_quality_score,
@@ -302,15 +316,15 @@ if __name__ == "__main__":
         
         result = await download_today_call_records(
             limit=200,
-            start_time="2025-10-17 13:00:00",
-            end_time="2025-10-17 16:00:00",
+            start_time="2025-10-20 08:40:00",
+            end_time="2025-10-20 23:30:00",
             advisor_group_id=2,
             check_cloud_url=True,
             check_conversation_content= None,
             min_call_quality_score= 19, # 质量评分大于0.5
             min_time_len=None,  # 通话时长大于30秒
-            max_time_len=None,  # 通话时长小于300秒
-            exclude_phones=None  # 排除指定号码
+            max_time_len=None,  # 通话时长小于300秒、
+            exclude_phones=['13189300627', '18028260616', '17369322905','13302752724']  # 排除指定号码
         )
         print(f"自定义筛选结果: {result}")
     
