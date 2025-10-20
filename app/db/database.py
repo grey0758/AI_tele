@@ -41,7 +41,7 @@ class Database:
 
         try:
             # 如果需要SSH隧道
-            if settings.ssh_host:
+            if False:
                 self.ssh_tunnel = ssh_tunnel.SSHClient()
                 if not await self.ssh_tunnel.connect():
                     raise DatabaseConnectionError("Failed to establish SSH tunnel")
