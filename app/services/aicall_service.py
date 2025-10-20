@@ -16,7 +16,7 @@ from app.services.redis_service import RedisService
 from app.db.database import Database
 from app.models.phone_call_queue import PhoneCallQueue, PhoneCallQueueCopy1
 from app.core.config import settings
-
+from sqlalchemy import update
 
 logger = get_logger(__name__)
 
