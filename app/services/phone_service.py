@@ -266,6 +266,17 @@ class PhoneService(BaseService):
             self.call_record = event.data
             self.call_record.instance = self.device_info.devices[self.call_record.instance].instance
 
+            # 检查时间限制：超过下午九点不允许拨打
+            current_time = datetime.now()
+            if current_time.hour >= 21:  # 21点（晚上9点）
+                logger.warning("当前时间 %s，超过晚上9点，不允许拨打", current_time.strftime("%H:%M:%S"))
+                return {
+                    "success": False,
+                    "phone_number": self.call_record.phone_number,
+                    "error": "Time restriction",
+                    "message": f"当前时间 {current_time.strftime('%H:%M:%S')}，超过晚上9点，不允许拨打",
+                }
+
             # 构建拨号消息
             dial_message = SendMessage(
                 method="call",
