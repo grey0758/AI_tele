@@ -53,7 +53,7 @@ class PhoneService(BaseService):
     def __init__(
         self,
         event_bus: Optional[ProductionEventBus] = None,
-        redis_service: Optional[RedisService] = None,
+        redis_service: Optional[RedisService] = None
     ):
         super().__init__(event_bus, "PhoneService")
         self.ws_url = "ws://127.0.0.1:9898/ws"
@@ -196,6 +196,7 @@ class PhoneService(BaseService):
                 self._cancel_timer("call_duration")
                 logger.info("挂断事件收到，取消通话时长定时器")
                 asyncio.run(self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record))
+                asyncio.run(self.emit_event(EventType.SYNC_SAVE_CALL_RECORD, self.call_record))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_record.call_id, "instance": self.call_record.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)

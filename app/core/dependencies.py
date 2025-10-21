@@ -71,7 +71,7 @@ class EnhancedServiceContainer:
         self._services["db_service"] = Database()
         self._services["redis_service"] = RedisService(self._event_bus, self._services["db_service"])
         self._services["sync_database_service"] = SyncDatabaseService(self._event_bus, self._services["db_service"])
-        self._services["phone_service"] = PhoneService(self._event_bus, self._services["redis_service"], self._services["sync_database_service"])
+        self._services["phone_service"] = PhoneService(self._event_bus, self._services["redis_service"])
         self._services["aicall_service"] = AicallService(self._event_bus, self._services["redis_service"], self._services["db_service"])
         self._services["realtime_service"] = RealtimeService(self._event_bus)
 
