@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     # 核心框架
     "fastapi",
-    "uvicorn>=0.24.0,<0.35.0",  # 指定版本范围，避免自动选择 [standard]
+    "uvicorn[standard]",
     "sqlalchemy",
     "alembic",
     # 数据验证
@@ -64,9 +64,7 @@ dev = [
     "aiomonitor>=0.6.0",
 ]
 audio = [
-    # 音频处理相关扩展包
-    "sounddevice>=0.4.0",
-    "librosa>=0.10.0",
+    "pyaudio>=0.2.11",
 ]
 cloud = [
     "cos-python-sdk-v5>=1.9.38",
@@ -77,10 +75,6 @@ link-mode = "copy"
 
 [tool.uv.pip]
 index-url = "https://mirrors.aliyun.com/pypi/simple/"
-# 强制使用预编译包，避免编译问题
-prefer-binary = true
-# 排除需要编译的包
-no-build = ["watchfiles", "maturin"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

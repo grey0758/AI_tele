@@ -26,6 +26,9 @@ class EventType(Enum):
     REDIS_CREATE_CALL_RECORD = "redis.create_call_record"
     REDIS_BIND_DIALOG_RECORD_TO_CALL_RECORD = "redis.bind_dialog_record_to_call_record"
     REDIS_SET_DEVICE_INFO = "redis.set_device_info"
+    
+    # 同步数据库事件
+    SYNC_SAVE_CALL_RECORD = "sync.save_call_record"
 
     # 自定义事件
     CUSTOM = "custom"
