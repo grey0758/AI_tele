@@ -274,7 +274,7 @@ class PhoneService(BaseService):
 
             # 检查时间限制：超过下午九点需要等待
             current_time = datetime.now()
-            logger.error("当前时间: %s", current_time.strftime("%H:%M:%S"))
+            logger.error("当前时间: %s", current_time.strftime("%H"))
             if current_time.hour >= 21:  # 21点（晚上9点）
                 logger.warning("当前时间 %s，超过晚上9点，进入等待状态", current_time.strftime("%H:%M:%S"))
                 logger.info("等待时间限制解除事件...")
