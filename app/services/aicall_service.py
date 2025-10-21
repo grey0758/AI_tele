@@ -14,7 +14,7 @@ from app.services.base_service import BaseService
 from app.core.event_bus import ProductionEventBus
 from app.services.redis_service import RedisService
 from app.db.database import Database
-from app.models.phone_call_queue import PhoneCallQueue, PhoneCallQueueCopy1
+from app.models.phone_call_queue import PhoneCallQueue, PhoneCallQueueCopy1, PhoneCallQueueTemp
 from app.core.config import settings
 from sqlalchemy import update
 
@@ -95,6 +95,8 @@ class AicallService(BaseService):
         """根据配置获取正确的队列表模型"""
         if settings.character_manifest_type == "ai_tele":
             return PhoneCallQueueCopy1
+        elif settings.character_manifest_type == "ai_tele_temp":
+            return PhoneCallQueueTemp
         else:
             return PhoneCallQueue
 
