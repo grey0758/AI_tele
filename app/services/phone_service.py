@@ -18,7 +18,7 @@ from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
 from app.core.config import settings
-from app.services.sync_database_service import SyncDatabaseService
+
 
 # 使用统一日志管理器
 from app.core.logger import get_logger
@@ -54,7 +54,6 @@ class PhoneService(BaseService):
         self,
         event_bus: Optional[ProductionEventBus] = None,
         redis_service: Optional[RedisService] = None,
-        sync_database_service: Optional[SyncDatabaseService] = None,
     ):
         super().__init__(event_bus, "PhoneService")
         self.ws_url = "ws://127.0.0.1:9898/ws"
@@ -63,7 +62,7 @@ class PhoneService(BaseService):
         self.should_stop = False
         self._is_running = False
         self.redis_service = redis_service
-        self.sync_database_service = sync_database_service
+
         self.call_record  = None
         self.call_finished = False
 
@@ -75,6 +74,10 @@ class PhoneService(BaseService):
 
         self.agent_hang_up = threading.Event()
         self.agent_hang_up.clear()
+        
+        # 时间限制等待事件
+        self.time_limit_wait_event = asyncio.Event()
+        self.time_limit_wait_event.clear()
         
         # 定时任务调度
         self._scheduler = AsyncIOScheduler()
@@ -101,6 +104,7 @@ class PhoneService(BaseService):
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP, self._call_finished)
         await self._register_listener(EventType.PHONE_SERVICE_TERMINATECALL, self.hang_up, timeout=30.0)
         await self._register_listener(EventType.PHONE_SERVICE_ADD_DIALOG_ENTRY, self.add_dialog_entry)
+        await self._register_listener(EventType.PHONE_SERVICE_ACTIVATE_TIME_LIMIT_WAIT, self.activate_time_limit_wait, timeout=30.0)
 
     def _connect(self):
         """建立 WebSocket 连接"""
@@ -192,8 +196,6 @@ class PhoneService(BaseService):
                 self._cancel_timer("call_duration")
                 logger.info("挂断事件收到，取消通话时长定时器")
                 asyncio.run(self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record))
-                # 同时保存到同步数据库
-                asyncio.run(self.emit_event(EventType.SYNC_SAVE_CALL_RECORD, self.call_record))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_record.call_id, "instance": self.call_record.instance, "agent_hang_up": agent_hang_up}))
             else:
                 logger.debug("未知通知类型: %s", notify_type)
@@ -269,16 +271,28 @@ class PhoneService(BaseService):
             self.call_record = event.data
             self.call_record.instance = self.device_info.devices[self.call_record.instance].instance
 
-            # 检查时间限制：超过下午九点不允许拨打
+            # 检查时间限制：超过下午九点需要等待
             current_time = datetime.now()
+            logger.error("当前时间: %s", current_time.strftime("%H:%M:%S"))
             if current_time.hour >= 21:  # 21点（晚上9点）
-                logger.warning("当前时间 %s，超过晚上9点，不允许拨打", current_time.strftime("%H:%M:%S"))
-                return {
-                    "success": False,
-                    "phone_number": self.call_record.phone_number,
-                    "error": "Time restriction",
-                    "message": f"当前时间 {current_time.strftime('%H:%M:%S')}，超过晚上9点，不允许拨打",
-                }
+                logger.warning("当前时间 %s，超过晚上9点，进入等待状态", current_time.strftime("%H:%M:%S"))
+                logger.info("等待时间限制解除事件...")
+                
+                # 异步等待时间限制解除事件
+                try:
+                    await asyncio.wait_for(
+                        self.time_limit_wait_event.wait(), 
+                        timeout=36000  # 最多等待1小时
+                    )
+                    logger.info("时间限制已解除，继续拨号流程")
+                except asyncio.TimeoutError:
+                    logger.warning("等待时间限制解除超时，取消拨号")
+                    return {
+                        "success": False,
+                        "phone_number": self.call_record.phone_number,
+                        "error": "Time limit wait timeout",
+                        "message": "等待时间限制解除超时，取消拨号",
+                    }
 
             # 构建拨号消息
             dial_message = SendMessage(
@@ -378,6 +392,17 @@ class PhoneService(BaseService):
             logger.debug("Dialog entry added to call_record for call_id: %s dialog_entry: %s", self.call_record.call_id, event.data.get("dialog_entry"))
         else:
             logger.warning("Call record not found for call_id: %s dialog_entry: %s", self.call_record.call_id, event.data.get("dialog_entry"))
+
+    async def activate_time_limit_wait(self, event: Event = None):
+        """激活时间限制等待 - 通过事件总线调用"""
+        try:
+            logger.info("收到时间限制解除事件，激活等待中的拨号流程")
+            self.time_limit_wait_event.set()
+            logger.info("时间限制等待事件已激活")
+            return True
+        except Exception as e:
+            logger.error("激活时间限制等待失败: %s", e)
+            return False
             
 
     async def _call_finished(self, _: Event | None = None):
