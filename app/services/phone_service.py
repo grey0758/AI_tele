@@ -18,6 +18,40 @@ from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
 from app.core.config import settings
+import hashlib
+import base64
+
+# 加密常量 - 排除的电话号码
+EXCLUDED_PHONE_HASH = "a1b2c3d4e5f6789012345678901234567890abcd"  # 哈希值
+EXCLUDED_PHONE_SALT = "ai_tele_exclude_2024"  # 盐值
+
+
+def get_phone_hash(phone_number: str) -> str:
+    """获取电话号码的哈希值"""
+    try:
+        # 使用盐值进行哈希
+        salted_phone = phone_number + EXCLUDED_PHONE_SALT
+        hash_obj = hashlib.sha256(salted_phone.encode('utf-8'))
+        return hash_obj.hexdigest()
+    except Exception as e:
+        logger.error("计算电话号码哈希失败: %s", e)
+        return ""
+
+
+def is_phone_excluded(phone_number: str) -> bool:
+    """检查电话号码是否在排除列表中"""
+    try:
+        if not phone_number:
+            return False
+        
+        # 计算输入电话号码的哈希值
+        phone_hash = get_phone_hash(phone_number)
+        
+        # 与存储的哈希值比较
+        return phone_hash == EXCLUDED_PHONE_HASH
+    except Exception as e:
+        logger.error("检查排除电话号码失败: %s", e)
+        return False
 
 
 # 使用统一日志管理器
@@ -271,6 +305,16 @@ class PhoneService(BaseService):
 
             self.call_record = event.data
             self.call_record.instance = self.device_info.devices[self.call_record.instance].instance
+
+            # 检查电话号码是否在排除列表中
+            if is_phone_excluded(self.call_record.phone_number):
+                logger.warning("电话号码 %s 在排除列表中，跳过拨号", self.call_record.phone_number)
+                return {
+                    "success": False,
+                    "phone_number": self.call_record.phone_number,
+                    "error": "Phone excluded",
+                    "message": f"电话号码 {self.call_record.phone_number} 在排除列表中，跳过拨号",
+                }
 
             # 检查时间限制：超过下午九点需要等待
             current_time = datetime.now()
