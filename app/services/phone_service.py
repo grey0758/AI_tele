@@ -18,8 +18,10 @@ from app.models.device_info import Device
 from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
 from app.core.config import settings
+from app.models.time_limit_config import TimeLimitConfig
+from sqlalchemy import select
 import hashlib
-import base64
+from app.db.database import Database
 
 # 加密常量 - 排除的电话号码
 EXCLUDED_PHONE_HASH = "a1b2c3d4e5f6789012345678901234567890abcd"  # 哈希值
@@ -87,7 +89,8 @@ class PhoneService(BaseService):
     def __init__(
         self,
         event_bus: Optional[ProductionEventBus] = None,
-        redis_service: Optional[RedisService] = None
+        redis_service: Optional[RedisService] = None,
+        db: Database | None = None
     ):
         super().__init__(event_bus, "PhoneService")
         self.ws_url = "ws://127.0.0.1:9898/ws"
@@ -96,6 +99,7 @@ class PhoneService(BaseService):
         self.should_stop = False
         self._is_running = False
         self.redis_service = redis_service
+        self.db = db
 
         self.call_record  = None
         self.call_finished = False
@@ -316,27 +320,35 @@ class PhoneService(BaseService):
                     "message": f"电话号码 {self.call_record.phone_number} 在排除列表中，跳过拨号",
                 }
 
-            # 检查时间限制：超过下午九点需要等待
+            # 检查时间限制：使用数据库配置
             current_time = datetime.now()
             logger.error("当前时间: %s", current_time.strftime("%H"))
-            if current_time.hour >= 21:  # 21点（晚上9点）
-                logger.warning("当前时间 %s，超过晚上9点，进入等待状态", current_time.strftime("%H:%M:%S"))
+            
+            # 获取时间限制配置
+            time_config = await self.get_time_limit_config()
+            limit_hour = time_config["limit_hour"]
+            wait_timeout = time_config["wait_timeout"]
+            is_enabled = time_config["is_enabled"]
+            
+            if is_enabled and current_time.hour >= limit_hour:
+                logger.warning("当前时间 %s，超过%d点，进入等待状态", 
+                             current_time.strftime("%H:%M:%S"), limit_hour)
                 logger.info("等待时间限制解除事件...")
                 
                 # 异步等待时间限制解除事件
                 try:
                     await asyncio.wait_for(
                         self.time_limit_wait_event.wait(), 
-                        timeout=36000  # 最多等待1小时
+                        timeout=wait_timeout
                     )
                     logger.info("时间限制已解除，继续拨号流程")
                 except asyncio.TimeoutError:
-                    logger.warning("等待时间限制解除超时，取消拨号")
+                    logger.warning("等待时间限制解除超时（%d秒），取消拨号", wait_timeout)
                     return {
                         "success": False,
                         "phone_number": self.call_record.phone_number,
                         "error": "Time limit wait timeout",
-                        "message": "等待时间限制解除超时，取消拨号",
+                        "message": f"等待时间限制解除超时（{wait_timeout}秒），取消拨号",
                     }
 
             # 构建拨号消息
@@ -437,6 +449,38 @@ class PhoneService(BaseService):
             logger.debug("Dialog entry added to call_record for call_id: %s dialog_entry: %s", self.call_record.call_id, event.data.get("dialog_entry"))
         else:
             logger.warning("Call record not found for call_id: %s dialog_entry: %s", self.call_record.call_id, event.data.get("dialog_entry"))
+
+    async def get_time_limit_config(self):
+        """获取时间限制配置"""
+        try:
+            if not self.db:
+                logger.warning("数据库连接不可用，使用默认配置")
+                return {"limit_hour": 22, "wait_timeout": 3600, "is_enabled": True}
+            
+            async with self.db.get_session() as session:
+                # 查询激活的配置
+                stmt = select(TimeLimitConfig).where(
+                    TimeLimitConfig.is_active,
+                    TimeLimitConfig.is_enabled
+                )
+                result = await session.execute(stmt)
+                config = result.scalar_one_or_none()
+                
+                if config:
+                    logger.info("使用数据库时间限制配置: 限制时间=%d点, 等待超时=%d秒", 
+                              config.limit_hour, config.wait_timeout)
+                    return {
+                        "limit_hour": config.limit_hour,
+                        "wait_timeout": config.wait_timeout,
+                        "is_enabled": config.is_enabled
+                    }
+                else:
+                    logger.warning("未找到激活的时间限制配置，使用默认配置")
+                    return {"limit_hour": 22, "wait_timeout": 3600, "is_enabled": True}
+                    
+        except Exception as e:
+            logger.error("获取时间限制配置失败: %s", e)
+            return {"limit_hour": 22, "wait_timeout": 3600, "is_enabled": True}
 
     async def activate_time_limit_wait(self, event: Event = None):
         """激活时间限制等待 - 通过事件总线调用"""
