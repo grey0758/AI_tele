@@ -15,6 +15,10 @@ from app.api.v1.api import api_router
 from app.core.dependencies import service_container, check_services_health
 from app.middleware.logging import logging_middleware
 from app.schemas.base import ResponseBuilder
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -25,6 +29,8 @@ async def lifespan(_app: FastAPI):
         # 初始化服务容器（包含事件总线和所有服务）
         await service_container.initialize()
         print("✅ All services initialized")
+
+        # 设备初始化完成后会自动启动测试呼叫
 
     except Exception as e:
         print(f"❌ Startup failed: {e}")

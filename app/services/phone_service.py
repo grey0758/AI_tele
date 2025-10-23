@@ -8,6 +8,8 @@ from datetime import datetime
 import json
 import websocket
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+import hashlib
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from app.models.events import Event
@@ -19,9 +21,12 @@ from app.services.base_service import BaseService
 from app.services.redis_service import DeviceInfo, RedisService
 from app.core.config import settings
 from app.models.time_limit_config import TimeLimitConfig
-from sqlalchemy import select
-import hashlib
+from app.schemas.aicall import CallRequest
 from app.db.database import Database
+from app.core.logger import get_logger
+
+# 获取模块级别的logger
+logger = get_logger(__name__)
 
 # 加密常量 - 排除的电话号码
 EXCLUDED_PHONE_HASH = "a1b2c3d4e5f6789012345678901234567890abcd"  # 哈希值
@@ -54,13 +59,6 @@ def is_phone_excluded(phone_number: str) -> bool:
     except Exception as e:
         logger.error("检查排除电话号码失败: %s", e)
         return False
-
-
-# 使用统一日志管理器
-from app.core.logger import get_logger
-
-# 获取模块级别的logger
-logger = get_logger(__name__)
 
 
 class SendMessage(BaseModel):
@@ -120,11 +118,20 @@ class PhoneService(BaseService):
         # 定时任务调度
         self._scheduler = AsyncIOScheduler()
         self._scheduler_started = False
+        
+        # 设备初始化状态
+        self._is_first_connection = True
+        self._initialization_complete = False
 
     async def initialize(self) -> bool:
         try:
             if not self._is_running:
-                self._connect()
+                if self._is_first_connection:
+                    logger.info("🔧 首次连接，启动设备初始化流程")
+                    self._initial_connect()
+                else:
+                    logger.info("📞 正常连接，启动电话服务")
+                    self._connect()
                 self._is_running = True
                 logger.info("PhoneService 已启动")
                 return True
@@ -168,10 +175,62 @@ class PhoneService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.error("建立 WebSocket 连接异常: %s", e)
 
+    def _initial_connect(self):
+        """首次连接初始化"""
+        if self.ws is not None:
+            logger.warning("WebSocket 连接已存在")
+            return
+
+        try:
+            logger.info("🔧 开始设备首次连接初始化")
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=self._on_initial_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+            )
+
+            def run_websocket():
+                self.ws.run_forever()
+
+            self.ws_thread = threading.Thread(target=run_websocket, daemon=True)
+            self.ws_thread.start()
+
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("建立首次 WebSocket 连接异常: %s", e)
+
     def _on_open(self, ws):  # pylint: disable=unused-argument
         """连接建立"""
         self._connection_event.set()
         logger.info("PhoneService WebSocket 连接已建立")
+
+    def _on_initial_open(self, ws):  # pylint: disable=unused-argument
+        """首次连接建立"""
+        self._connection_event.set()
+        logger.info("🔧 设备首次连接已建立，发送挂断和系统重启命令")
+        
+        # 先发送挂断命令
+        hangup_message = SendMessage(
+            method="terminateCall",
+            instance=6
+        )
+        
+        if self.send_message(hangup_message):
+            logger.info("✅ 挂断命令已发送")
+        else:
+            logger.error("❌ 发送挂断命令失败")
+        
+        # 然后发送系统重启消息
+        reboot_message = SendMessage(
+            method="sysReboot",
+            instance=6
+        )
+        
+        if self.send_message(reboot_message):
+            logger.info("✅ 系统重启命令已发送")
+        else:
+            logger.error("❌ 发送系统重启命令失败")
 
     def _on_message(self, ws, message):  # pylint: disable=unused-argument
         """处理消息"""
@@ -236,6 +295,12 @@ class PhoneService(BaseService):
                 asyncio.run(self.emit_event(EventType.REDIS_CREATE_CALL_RECORD, self.call_record))
                 asyncio.run(self.emit_event(EventType.SYNC_SAVE_CALL_RECORD, self.call_record))
                 asyncio.run(self.emit_event(EventType.PHONE_SERVICE_ONHANGUP,{"call_id": self.call_record.call_id, "instance": self.call_record.instance, "agent_hang_up": agent_hang_up}))
+
+            elif notify_type == "OnBtConnectStatus":
+                # 处理蓝牙连接状态事件
+                logger.info("📱 收到OnBtConnectStatus事件，设备初始化完成")
+                self._handle_bt_connect_status(data)
+
             else:
                 logger.debug("未知通知类型: %s", notify_type)
 
@@ -482,7 +547,7 @@ class PhoneService(BaseService):
             logger.error("获取时间限制配置失败: %s", e)
             return {"limit_hour": 22, "wait_timeout": 3600, "is_enabled": True}
 
-    async def activate_time_limit_wait(self, event: Event = None):
+    async def activate_time_limit_wait(self, event: Event = None):  # pylint: disable=unused-argument
         """激活时间限制等待 - 通过事件总线调用"""
         try:
             logger.info("收到时间限制解除事件，激活等待中的拨号流程")
@@ -492,6 +557,49 @@ class PhoneService(BaseService):
         except Exception as e:
             logger.error("激活时间限制等待失败: %s", e)
             return False
+
+    def _handle_bt_connect_status(self, data: Dict):
+        """处理蓝牙连接状态事件"""
+        try:
+            logger.info("📱 处理OnBtConnectStatus事件: %s", data)
+            
+            # 标记初始化完成
+            self._initialization_complete = True
+            self._is_first_connection = False
+            
+            # 启动测试呼叫
+            asyncio.create_task(self._start_test_call())
+            
+        except Exception as e:
+            logger.error("处理OnBtConnectStatus事件失败: %s", e)
+
+    async def _start_test_call(self):
+        """启动测试呼叫"""
+        try:
+            logger.info("🚀 开始执行延迟测试呼叫")
+            
+            # 根据配置类型设置不同的开场白
+            if settings.character_manifest_type == "ai_tele":
+                opening_text = "你好老板，用AI电话销售帮你找客户，你想具体了解吗？"
+            else:
+                opening_text = "你好，我是广州大麦的，你有在线上营销，一起联合运营的想法吗？"
+            
+            logger.info("📢 使用开场白: %s", opening_text)
+
+            # 创建测试请求
+            test_request = CallRequest(
+                phone_number="18928875116",
+                device_index=0,
+                tts_opening=opening_text,
+                custom_id=None
+            )
+            
+            # 通过事件总线发送测试呼叫事件
+            await self.emit_event(EventType.PHONE_SERVICE_CALL_OUT, test_request)
+            logger.info("✅ 测试呼叫事件已发送")
+            
+        except Exception as e:
+            logger.error("❌ 启动测试呼叫失败: %s", e)
             
 
     async def _call_finished(self, _: Event | None = None):
