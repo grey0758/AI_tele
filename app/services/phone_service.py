@@ -567,16 +567,6 @@ class PhoneService(BaseService):
             # 标记初始化完成
             self._initialization_complete = True
             self._is_first_connection = False
-            
-            # 启动测试呼叫
-            asyncio.create_task(self._start_test_call())
-            
-        except Exception as e:
-            logger.error("处理OnBtConnectStatus事件失败: %s", e)
-
-    async def _start_test_call(self):
-        """启动测试呼叫"""
-        try:
             logger.info("🚀 开始执行延迟测试呼叫")
             
             # 根据配置类型设置不同的开场白
@@ -596,12 +586,12 @@ class PhoneService(BaseService):
             )
             
             # 通过事件总线发送测试呼叫事件
-            await self.emit_event(EventType.PHONE_SERVICE_CALL_OUT, test_request)
+            asyncio.run(self.emit_event(EventType.PHONE_SERVICE_CALL_OUT, test_request))
             logger.info("✅ 测试呼叫事件已发送")
             
         except Exception as e:
-            logger.error("❌ 启动测试呼叫失败: %s", e)
-            
+            logger.error("处理OnBtConnectStatus事件失败: %s", e)
+
 
     async def _call_finished(self, _: Event | None = None):
         """通话结束"""
