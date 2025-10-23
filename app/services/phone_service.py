@@ -126,12 +126,7 @@ class PhoneService(BaseService):
     async def initialize(self) -> bool:
         try:
             if not self._is_running:
-                if self._is_first_connection:
-                    logger.info("🔧 首次连接，启动设备初始化流程")
-                    self._initial_connect()
-                else:
-                    logger.info("📞 正常连接，启动电话服务")
-                    self._connect()
+                self._connect()
                 self._is_running = True
                 logger.info("PhoneService 已启动")
                 return True
@@ -158,9 +153,17 @@ class PhoneService(BaseService):
             return
 
         try:
+            # 根据是否首次连接选择回调函数
+            if self._is_first_connection:
+                logger.info("🔧 首次连接，启动设备初始化流程")
+                on_open_callback = self._on_initial_open
+            else:
+                logger.info("📞 正常连接，启动电话服务")
+                on_open_callback = self._on_open
+
             self.ws = websocket.WebSocketApp(
                 self.ws_url,
-                on_open=self._on_open,
+                on_open=on_open_callback,
                 on_message=self._on_message,
                 on_error=self._on_error,
                 on_close=self._on_close,
@@ -175,31 +178,6 @@ class PhoneService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.error("建立 WebSocket 连接异常: %s", e)
 
-    def _initial_connect(self):
-        """首次连接初始化"""
-        if self.ws is not None:
-            logger.warning("WebSocket 连接已存在")
-            return
-
-        try:
-            logger.info("🔧 开始设备首次连接初始化")
-            self.ws = websocket.WebSocketApp(
-                self.ws_url,
-                on_open=self._on_initial_open,
-                on_message=self._on_message,
-                on_error=self._on_error,
-                on_close=self._on_close,
-            )
-
-            def run_websocket():
-                self.ws.run_forever()
-
-            self.ws_thread = threading.Thread(target=run_websocket, daemon=True)
-            self.ws_thread.start()
-
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("建立首次 WebSocket 连接异常: %s", e)
-
     def _on_open(self, ws):  # pylint: disable=unused-argument
         """连接建立"""
         self._connection_event.set()
@@ -208,29 +186,7 @@ class PhoneService(BaseService):
     def _on_initial_open(self, ws):  # pylint: disable=unused-argument
         """首次连接建立"""
         self._connection_event.set()
-        logger.info("🔧 设备首次连接已建立，发送挂断和系统重启命令")
-        
-        # 先发送挂断命令
-        hangup_message = SendMessage(
-            method="terminateCall",
-            instance=6
-        )
-        
-        if self.send_message(hangup_message):
-            logger.info("✅ 挂断命令已发送")
-        else:
-            logger.error("❌ 发送挂断命令失败")
-        
-        # 然后发送系统重启消息
-        reboot_message = SendMessage(
-            method="sysReboot",
-            instance=6
-        )
-        
-        if self.send_message(reboot_message):
-            logger.info("✅ 系统重启命令已发送")
-        else:
-            logger.error("❌ 发送系统重启命令失败")
+        logger.info("🔧 设备首次连接已建立，等待OnConnect消息获取设备信息")
 
     def _on_message(self, ws, message):  # pylint: disable=unused-argument
         """处理消息"""
@@ -495,6 +451,11 @@ class PhoneService(BaseService):
 
             self.device_info = device_info
 
+            # 如果是首次连接，发送挂断和重启命令
+            if self._is_first_connection:
+                logger.info("🔧 首次连接，发送挂断和系统重启命令")
+                self._send_initialization_commands()
+
             asyncio.run(self.emit_event(EventType.REDIS_SET_DEVICE_INFO, device_info))
 
             return {
@@ -506,6 +467,46 @@ class PhoneService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.error("Error handling OnConnect message: %s", e)
             return {"success": False, "error": str(e), "message": "处理连接消息失败"}
+
+    def _send_initialization_commands(self):
+        """发送初始化命令（挂断和重启）"""
+        try:
+            # 获取设备实例
+            instance = 3  # 默认值
+            if self.device_info and self.device_info.devices and len(self.device_info.devices) > 0:
+                instance = self.device_info.devices[0].instance
+                logger.info("📱 使用设备实例: %s", instance)
+            else:
+                logger.warning("⚠️ 设备信息不可用，使用默认实例: %s", instance)
+            
+            # 先发送挂断命令
+            hangup_message = SendMessage(
+                method="terminateCall",
+                instance=instance
+            )
+            
+            if self.send_message(hangup_message):
+                logger.info("✅ 挂断命令已发送")
+            else:
+                logger.error("❌ 发送挂断命令失败")
+            
+            # 然后发送系统重启消息
+            reboot_message = SendMessage(
+                method="sysReboot",
+                instance=instance
+            )
+            
+            if self.send_message(reboot_message):
+                logger.info("✅ 系统重启命令已发送")
+            else:
+                logger.error("❌ 发送系统重启命令失败")
+            
+            # 标记首次连接完成，后续连接将使用正常连接方式
+            self._is_first_connection = False
+            logger.info("🔧 首次连接初始化完成，后续连接将使用正常模式")
+                
+        except Exception as e:
+            logger.error("❌ 发送初始化命令失败: %s", e)
 
     async def add_dialog_entry(self, event: Event):
         """添加对话记录"""
