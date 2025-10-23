@@ -586,7 +586,7 @@ class PhoneService(BaseService):
             )
             
             # 通过事件总线发送测试呼叫事件
-            asyncio.run(self.emit_event(EventType.PHONE_SERVICE_CALL_OUT, test_request))
+            asyncio.run(self.emit_event(EventType.PHONE_SERVICE_MAKE_CALL_FROM_EVENT, test_request))
             logger.info("✅ 测试呼叫事件已发送")
             
         except Exception as e:

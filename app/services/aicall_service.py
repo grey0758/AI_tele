@@ -39,6 +39,7 @@ class AicallService(BaseService):
     async def register_event_listeners(self):
         """注册事件监听器"""
         await self._register_listener(EventType.PHONE_SERVICE_ONHANGUP_AUTO_CALL, self.auto_call_next_phone, timeout=30.0)
+        await self._register_listener(EventType.PHONE_SERVICE_MAKE_CALL_FROM_EVENT, self.make_call_from_event, timeout=30.0)
 
     async def make_call(self, call_request: CallRequest):
         """
@@ -79,6 +80,29 @@ class AicallService(BaseService):
         except Exception as e:  # pylint: disable=broad-except
             logger.error("Error making call to %s: %s", call_request.phone_number, e)
             raise e
+
+    async def make_call_from_event(self, event: Event):
+        """
+        通过事件调用make_call方法
+        
+        Args:
+            event: 包含CallRequest数据的事件
+        """
+        try:
+            if not event.data:
+                logger.error("事件数据为空，无法执行make_call")
+                return
+            
+            # 从事件数据中获取CallRequest
+            call_request = event.data
+            logger.info("📞 通过事件调用make_call: %s", call_request.phone_number)
+            
+            # 调用make_call方法
+            await self.make_call(call_request)
+            logger.info("✅ 事件调用make_call完成")
+            
+        except Exception as e:
+            logger.error("❌ 事件调用make_call失败: %s", e)
 
     async def reset_to_initialized_state(self, _: Event | None = None):
         """重置到初始化状态"""

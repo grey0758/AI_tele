@@ -30,6 +30,9 @@ class EventType(Enum):
     
     # 同步数据库事件
     SYNC_SAVE_CALL_RECORD = "sync.save_call_record"
+    
+    # 测试呼叫事件
+    PHONE_SERVICE_MAKE_CALL_FROM_EVENT = "phone_service.make_call_from_event"
 
     # 自定义事件
     CUSTOM = "custom"
